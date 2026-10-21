@@ -112,6 +112,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     menu: <path d="M4 7h16M4 12h16M4 17h16" />,
     star: <path d="m12 3 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3Z" />,
     globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></>,
+    book: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H19v15H6.5A2.5 2.5 0 0 0 4 20.5v-15Z" /><path d="M4 20.5A2.5 2.5 0 0 1 6.5 18H19v3H6.5A2.5 2.5 0 0 1 4 20.5Z" /></>,
   };
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -732,19 +733,86 @@ function DetailModal({ movie, close, props }: { movie: Movie; close: () => void;
   </div></div>;
 }
 
-function Onboarding({ close, complete, languages }: { close: () => void; complete: (profile: TasteProfile, ratings: Record<number, number>, favourites: Movie[]) => void; languages: Record<string, string> }) {
+type OnboardingAnswers = {
+  profile: TasteProfile;
+  favourites: Movie[];
+  moods: string[];
+  releasePeriod: string;
+  duration: string;
+  discovery: DiscoverySettings;
+};
+
+type TasteChoice = "popular" | "balanced" | "hidden";
+
+const ONBOARDING_STEPS: { kicker: string; title: string; copy: string }[] = [
+  { kicker: "FAVOURITE GENRES", title: "What worlds pull you in?", copy: "Pick the genres you reach for first. They become your primary ranking signals across the live catalogue." },
+  { kicker: "FAVOURITE MOVIE", title: "Which films feel like home?", copy: "Search the live TMDB catalogue and choose at least one favourite. They seed language, genre, and similar-title requests." },
+  { kicker: "PREFERRED LANGUAGE", title: "Which languages should we speak?", copy: "CineMind recommends originals as well as dubs. Choose every language you are happy to watch in." },
+  { kicker: "MOVIE STYLE", title: "How do you like your movies?", copy: "Select the styles that describe films you finish and recommend. Each one maps to real TMDB genres." },
+  { kicker: "RELEASE PERIOD", title: "Which era owns your heart?", copy: "Set the release window the engine should favour when language and genre signals are evenly matched." },
+  { kicker: "TODAY'S MOOD", title: "What is your mood tonight?", copy: "Your mood maps to catalogue genres, so tonight's pick lands in a single tap from the dashboard." },
+  { kicker: "POPULAR VS HIDDEN", title: "Mainstream, or hidden gem?", copy: "This sets how far the hybrid engine wanders from well-known titles on every recommendation run." },
+];
+
+const STYLE_OPTIONS: { value: string; label: string; copy: string; icon: string }[] = [
+  { value: "Visual spectacle", label: "Visual spectacle", copy: "Large-scale action, adventure, and worlds built to be looked at.", icon: "star" },
+  { value: "Character drama", label: "Character drama", copy: "Intimate stories carried by performance, dialogue, and quiet detail.", icon: "heart" },
+  { value: "Mind-bending", label: "Mind-bending", copy: "Puzzles, twists, and ideas that keep working after the credits.", icon: "orbit" },
+  { value: "True stories", label: "True stories", copy: "Documentaries and history-led films grounded in real events.", icon: "book" },
+  { value: "Dark & gritty", label: "Dark & gritty", copy: "Crime, thriller, and horror with a harder edge and lower lights.", icon: "moon" },
+  { value: "Light & charming", label: "Light & charming", copy: "Comfort watches, comedy, and easy company after a long day.", icon: "sun" },
+];
+
+const PERIOD_OPTIONS: { value: string; label: string; copy: string }[] = [
+  { value: "", label: "Any era", copy: "Release year stays open across every language." },
+  { value: "2020s", label: "2020s", copy: "Streaming-era releases from the current decade." },
+  { value: "2010s", label: "2010s", copy: "Recent favourites from the last full decade." },
+  { value: "2000s", label: "2000s", copy: "Digital-era cinema and turn-of-the-century titles." },
+  { value: "1990s", label: "1990s", copy: "Nineties nostalgia and decade-defining films." },
+  { value: "classic", label: "Classics", copy: "Pre-1990 cinema and enduring repertory titles." },
+];
+
+const TASTE_OPTIONS: { value: TasteChoice; label: string; copy: string; icon: string }[] = [
+  { value: "popular", label: "Popular hits", copy: "Widely seen titles, box-office favourites, and cultural touchstones.", icon: "star" },
+  { value: "balanced", label: "A balanced mix", copy: "Known favourites sitting alongside fresher catalogue discoveries.", icon: "compass" },
+  { value: "hidden", label: "Hidden gems", copy: "Lower-popularity titles with strong ratings and cult followings.", icon: "spark" },
+];
+
+function discoveryForTaste(taste: TasteChoice): DiscoverySettings {
+  if (taste === "popular") return { mode: "taste", familiarity: 78, diversity: 38, novelty: 24, popularity: 86 };
+  if (taste === "hidden") return { mode: "surprise", familiarity: 34, diversity: 74, novelty: 86, popularity: 18 };
+  return { mode: "taste", familiarity: 55, diversity: 60, novelty: 50, popularity: 55 };
+}
+
+function inferTasteChoice(discovery: DiscoverySettings): TasteChoice {
+  if (discovery.popularity >= 65) return "popular";
+  if (discovery.novelty >= 65 && discovery.popularity <= 50) return "hidden";
+  return "balanced";
+}
+
+function Onboarding({ close, complete, languages, genreOptions, profile, discovery }: {
+  close: () => void;
+  complete: (answers: OnboardingAnswers) => void;
+  languages: Record<string, string>;
+  genreOptions: string[];
+  profile: TasteProfile;
+  discovery: DiscoverySettings;
+}) {
+  const totalSteps = ONBOARDING_STEPS.length;
+  const hasExistingProfile = profile.genres.length > 0 || profile.languages.length > 0 || profile.favouriteMovies.length > 0;
   const [step, setStep] = useState(1);
-  const [genres, setGenres] = useState<string[]>([]);
-  const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
-  const [selectedMovies, setSelectedMovies] = useState<Movie[]>([]);
-  const [ratings, setRatings] = useState<Record<number, number>>({});
-  const [discovery, setDiscovery] = useState<"familiar" | "new" | null>(null);
+  const [selectedGenres, setSelectedGenres] = useState<string[]>(profile.genres);
+  const [selectedLanguages, setSelectedLanguages] = useState<string[]>(profile.languages);
+  const [selectedMovies, setSelectedMovies] = useState<Movie[]>(() => getRegisteredMovies(profile.favouriteMovies).filter((movie) => Boolean(movie.externalId)));
+  const [styles, setStyles] = useState<string[]>([]);
+  const [period, setPeriod] = useState<string | null>(null);
+  const [mood, setMood] = useState<string | null>(null);
+  const [taste, setTaste] = useState<TasteChoice | null>(() => hasExistingProfile ? inferTasteChoice(discovery) : null);
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<Movie[]>([]);
-  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [optionsLoading, setOptionsLoading] = useState(true);
   const [optionsError, setOptionsError] = useState<string | null>(null);
-  const [preview, setPreview] = useState<Movie[]>([]);
-  const genreOptions = CSV_GENRES;
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -768,63 +836,97 @@ function Onboarding({ close, complete, languages }: { close: () => void; complet
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [query, selectedLanguages]);
 
-  useEffect(() => {
-    if (step !== 5) return;
-    let cancelled = false;
-    const genreName = genres[0];
-    const genreId = genreName ? Object.entries({ 28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime", 99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History", 27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction", 53: "Thriller", 10752: "War", 37: "Western" }).find(([, name]) => name === genreName)?.[0] : undefined;
-    api.catalogueDiscover({ genre: genreId, language: selectedLanguages[0], sort_by: "vote_average.desc", vote_count_gte: 40, page: 1 }).then((data) => {
-      if (!cancelled) setPreview(data.results.slice(0, 4).map(catalogueToMovie));
-    }).catch(() => {
-      if (!cancelled) setPreview(selectedMovies.slice(0, 4));
-    });
-    return () => { cancelled = true; };
-  }, [step]);
+  const currentStep = ONBOARDING_STEPS[step - 1];
+  const canContinue =
+    step === 1 ? selectedGenres.length > 0 :
+    step === 2 ? selectedMovies.length > 0 || Boolean(optionsError) :
+    step === 3 ? selectedLanguages.length > 0 :
+    step === 4 ? styles.length > 0 :
+    step === 5 ? period !== null :
+    step === 6 ? mood !== null :
+    taste !== null;
 
-  const temporaryProfile: TasteProfile = { genres, languages: selectedLanguages, favouriteMovies: selectedMovies.map((movie) => movie.id), discovery: discovery || "new" };
-  const onboardingContext: RecommendationContext = { settings: { ...defaultDiscovery, mode: discovery === "familiar" ? "taste" : "surprise" }, profile: temporaryProfile, feedback: {}, ratings, catalogue: registryCatalogue };
-  const initialRecommendations = preview.length ? rerankMoviesForDiversity(preview, onboardingContext, 4).map((item) => item.movie) : selectedMovies.slice(0, 4);
-  const canContinue = step === 1 ? genres.length >= 2 : step === 2 ? selectedMovies.length > 0 || Boolean(optionsError) : step === 4 ? discovery !== null : true;
-  const finish = () => complete({ genres, languages: selectedLanguages, favouriteMovies: selectedMovies.map((movie) => movie.id), discovery: discovery || "new" }, ratings, selectedMovies);
+  const stepHint =
+    step === 1 ? `${selectedGenres.length} genre${selectedGenres.length === 1 ? "" : "s"} selected · pick at least one` :
+    step === 2 ? (optionsError && !selectedMovies.length ? "Catalogue unavailable · continue without a favourite" : `${selectedMovies.length} film${selectedMovies.length === 1 ? "" : "s"} selected from the live catalogue`) :
+    step === 3 ? `${selectedLanguages.length} language${selectedLanguages.length === 1 ? "" : "s"} selected · pick at least one` :
+    step === 4 ? `${styles.length} style${styles.length === 1 ? "" : "s"} selected` :
+    step === 5 ? (period === null ? "Choose a release period" : period || "Any era") :
+    step === 6 ? (mood ?? "Choose tonight's mood") :
+    "Ready for the live catalogue engine";
 
-  return <div className="modal-backdrop onboarding-bg"><div className="onboarding" role="dialog" aria-modal="true">
+  const summaryEntries = [
+    ...selectedGenres.slice(0, 3),
+    ...selectedLanguages.slice(0, 3).map((code) => languages[code] || code),
+    `${selectedMovies.length} favourite film${selectedMovies.length === 1 ? "" : "s"}`,
+    ...styles,
+    period === null ? "" : period || "Any era",
+    mood ?? "",
+    TASTE_OPTIONS.find((option) => option.value === taste)?.label ?? "",
+  ].filter((entry) => entry !== "");
+
+  const finish = () => {
+    if (submitting || period === null || mood === null || taste === null) return;
+    setSubmitting(true);
+    Promise.resolve(complete({
+      profile: {
+        genres: selectedGenres,
+        languages: selectedLanguages,
+        favouriteMovies: selectedMovies.map((movie) => movie.id),
+        discovery: taste === "hidden" ? "new" : "familiar",
+      },
+      favourites: selectedMovies,
+      moods: [mood, ...styles],
+      releasePeriod: period,
+      duration: "",
+      discovery: discoveryForTaste(taste),
+    })).finally(() => setSubmitting(false));
+  };
+
+  return <div className="modal-backdrop onboarding-bg"><div className="onboarding" role="dialog" aria-modal="true" aria-label="CineMind taste questionnaire">
     <div className="onboarding-top"><div className="brand-mark">C</div><span>BUILD YOUR TASTE PROFILE</span><button onClick={close}>Skip for now</button></div>
-    <div className="progress">{[1, 2, 3, 4, 5].map((n) => <i key={n} className={step >= n ? "active" : ""} />)}</div>
+    <div className="progress" role="progressbar" aria-label="Questionnaire progress" aria-valuemin={1} aria-valuemax={totalSteps} aria-valuenow={step}>{ONBOARDING_STEPS.map((entry, index) => <i key={entry.kicker} className={step >= index + 1 ? "active" : ""} />)}</div>
     <div className="onboarding-content">
-      {step === 1 && <><span className="eyebrow">STEP 1 OF 5</span><h2>What worlds pull you in?</h2><p>Choose at least two genres. Languages are optional and unlock cross-language recommendations.</p><div className="choice-grid">{genreOptions.map((genre) => <button className={genres.includes(genre) ? "active" : ""} onClick={() => setGenres(genres.includes(genre) ? genres.filter((entry) => entry !== genre) : [...genres, genre])} key={genre}>{genre}{genres.includes(genre) && <Icon name="check" />}</button>)}</div><div className="chip-row">{Object.entries(languages).slice(0, 14).map(([code, label]) => <button key={code} className={`chip ${selectedLanguages.includes(code) ? "active" : ""}`} onClick={() => setSelectedLanguages((current) => current.includes(code) ? current.filter((entry) => entry !== code) : [...current, code])}>{label}{selectedLanguages.includes(code) && <Icon name="check" size={12} />}</button>)}</div></>}
-      {step === 2 && <><span className="eyebrow">STEP 2 OF 5</span><h2>Pick a few favourites.</h2><p>Search the live TMDB catalogue. Your selections become real language and genre signals.</p><label className="onboarding-search"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search any movie or language" /></label>{optionsError ? <p className="filter-note">Catalogue unavailable: {optionsError}. You can continue and configure TMDB later.</p> : null}<div className="onboarding-posters">{optionsLoading ? [1, 2, 3, 4, 5, 6].map((n) => <i className="poster-skeleton" key={n} />) : options.map((movie) => <button key={movie.id} className={selectedMovies.some((entry) => entry.id === movie.id) ? "active" : ""} onClick={() => setSelectedMovies((current) => current.some((entry) => entry.id === movie.id) ? current.filter((entry) => entry.id !== movie.id) : [...current, movie])}><Poster movie={movie} /><span>{movie.title}</span>{selectedMovies.some((entry) => entry.id === movie.id) && <i><Icon name="check" /></i>}</button>)}</div></>}
-      {step === 3 && <><span className="eyebrow">STEP 3 OF 5 · OPTIONAL</span><h2>Make the signal sharper.</h2><p>Rate your selected films. Ratings power collaborative filtering and content signals.</p><div className="rating-stack">{selectedMovies.map((movie) => <div key={movie.id}><Poster movie={movie} /><span>{movie.title}<small>{movie.year > 0 ? movie.year : movie.language}</small></span><div>{[1, 2, 3, 4, 5].map((n) => <button className={(ratings[movie.id] || 0) >= n ? "active" : ""} onClick={() => setRatings({ ...ratings, [movie.id]: n })} aria-label={`Rate ${movie.title} ${n} stars`} key={n}><Icon name="star" /></button>)}</div></div>)}</div></>}
-      {step === 4 && <><span className="eyebrow">STEP 4 OF 5</span><h2>Comfort, or discovery?</h2><p>Set your starting point. You’ll always be able to adjust it.</p><div className="discovery-choice"><button className={discovery === "familiar" ? "active" : ""} onClick={() => setDiscovery("familiar")}><Icon name="heart" size={28} /><strong>Keep it familiar</strong><span>More films close to what you already love.</span></button><button className={discovery === "new" ? "active" : ""} onClick={() => setDiscovery("new")}><Icon name="orbit" size={28} /><strong>Lead me somewhere new</strong><span>Cross-language picks with a thread back to your taste.</span></button></div></>}
-      {step === 5 && <><span className="eyebrow">YOUR FIRST LIVE CATALOGUE EDIT</span><h2>Your cinema starts here.</h2><p>These titles come from the live TMDB catalogue using your genres, languages, and selected films.</p><div className="onboarding-posters result">{initialRecommendations.map((movie) => <article key={movie.id}><Poster movie={movie} /><span>{movie.title}</span><small>{movie.genres.join(" · ")} · {movie.language}</small></article>)}</div></>}
+      <span className="eyebrow">STEP {step} OF {totalSteps} · {currentStep.kicker}</span>
+      <h2>{currentStep.title}</h2>
+      <p>{currentStep.copy}</p>
+      {step === 1 && <div className="choice-grid">{genreOptions.map((genre) => { const active = selectedGenres.includes(genre); return <button key={genre} className={active ? "active" : ""} aria-pressed={active} onClick={() => setSelectedGenres((current) => current.includes(genre) ? current.filter((entry) => entry !== genre) : [...current, genre])}>{genre}{active && <Icon name="check" />}</button>; })}</div>}
+      {step === 2 && <><label className="onboarding-search"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search any movie or language" aria-label="Search the live TMDB catalogue" /></label>{optionsError ? <p className="filter-note">Catalogue unavailable: {optionsError}. Search again once the backend and TMDB key are configured.</p> : null}<div className="onboarding-posters">{optionsLoading ? [1, 2, 3, 4, 5, 6].map((n) => <i className="poster-skeleton" key={n} />) : options.map((movie) => { const active = selectedMovies.some((entry) => entry.id === movie.id); return <button key={movie.id} className={active ? "active" : ""} aria-pressed={active} onClick={() => setSelectedMovies((current) => current.some((entry) => entry.id === movie.id) ? current.filter((entry) => entry.id !== movie.id) : [...current, movie])}><Poster movie={movie} /><span>{movie.title}</span>{active && <i><Icon name="check" /></i>}</button>; })}</div></>}
+      {step === 3 && <div className="chip-row">{Object.entries(languages).map(([code, label]) => { const active = selectedLanguages.includes(code); return <button key={code} className={`chip ${active ? "active" : ""}`} aria-pressed={active} onClick={() => setSelectedLanguages((current) => current.includes(code) ? current.filter((entry) => entry !== code) : [...current, code])}>{label}{active && <Icon name="check" size={12} />}</button>; })}</div>}
+      {step === 4 && <div className="option-grid">{STYLE_OPTIONS.map((option) => { const active = styles.includes(option.value); return <button key={option.value} className={`option-card ${active ? "active" : ""}`} aria-pressed={active} onClick={() => setStyles((current) => current.includes(option.value) ? current.filter((entry) => entry !== option.value) : [...current, option.value])}><Icon name={option.icon} /><strong>{option.label}</strong><small>{option.copy}</small><i><Icon name="check" size={15} /></i></button>; })}</div>}
+      {step === 5 && <div className="option-grid">{PERIOD_OPTIONS.map((option) => { const active = period === option.value; return <button key={option.value || "any-era"} className={`option-card ${active ? "active" : ""}`} aria-pressed={active} onClick={() => setPeriod(option.value)}><strong>{option.label}</strong><small>{option.copy}</small><i><Icon name="check" size={15} /></i></button>; })}</div>}
+      {step === 6 && <div className="option-grid">{Object.entries(MOODS).map(([name, entry]) => { const active = mood === name; return <button key={name} className={`option-card ${active ? "active" : ""}`} aria-pressed={active} onClick={() => setMood(name)}><span className="mood-symbol">{entry.symbol}</span><strong>{name}</strong><small>{entry.copy}</small><i><Icon name="check" size={15} /></i></button>; })}</div>}
+      {step === 7 && <><div className="option-grid">{TASTE_OPTIONS.map((option) => { const active = taste === option.value; return <button key={option.value} className={`option-card ${active ? "active" : ""}`} aria-pressed={active} onClick={() => setTaste(option.value)}><Icon name={option.icon} /><strong>{option.label}</strong><small>{option.copy}</small><i><Icon name="check" size={15} /></i></button>; })}</div><div className="onboarding-summary"><span className="summary-label">YOUR PROFILE</span>{summaryEntries.map((entry, index) => <span className="chip" key={`${entry}-${index}`}>{entry}</span>)}</div></>}
     </div>
-    <div className="onboarding-footer"><span>{step === 1 ? `${genres.length} genres · ${selectedLanguages.length} languages` : step === 2 ? `${selectedMovies.length} movies selected` : step === 5 ? "Taste profile ready" : "Your choices remain editable"}</span><div>{step > 1 && <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button>}<Button disabled={!canContinue} onClick={() => step === 5 ? finish() : setStep(step + 1)}>{step === 5 ? "Enter CineMind" : "Continue"} <Icon name="arrow" /></Button></div></div>
+    <div className="onboarding-footer"><span>Step {step} of {totalSteps} · {stepHint}</span><div><Button variant="ghost" onClick={() => setStep(step - 1)} disabled={step === 1 || submitting}>Back</Button><Button disabled={!canContinue || submitting} onClick={() => (step === totalSteps ? finish() : setStep(step + 1))}>{submitting ? "Loading recommendations…" : step === totalSteps ? "Discover My Movies" : "Continue"} {!submitting && <Icon name="arrow" />}</Button></div></div>
   </div></div>;
 }
 
 function AuthScreen({ onLogin, onRegister, loading, error }: { onLogin: (email: string, password: string) => void; onRegister: (name: string, email: string, password: string) => void; loading: boolean; error: string | null }) {
   const [mode, setMode] = useState<"login" | "register">("login");
-  return <div className="modal-backdrop" style={{ zIndex: 200 }}>
-    <div style={{ maxWidth: 420, width: "100%", background: "var(--surface, #15161a)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 12, padding: 24 }}>
-      <div className="brand-mark" style={{ marginBottom: 12 }}>C</div>
-      <h2 style={{ marginTop: 0 }}>{mode === "login" ? "Sign in" : "Create account"}</h2>
-      <p style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.6 }}>CineMind stores your preferences, favourites, ratings, and watchlist so the multilingual recommender can personalize across languages.</p>
-      <form onSubmit={(e) => {
-        e.preventDefault();
-        const fd = new FormData(e.currentTarget);
-        const email = String(fd.get("email") || "");
-        const password = String(fd.get("password") || "");
-        if (mode === "login") onLogin(email, password);
-        else onRegister(String(fd.get("name") || ""), email, password);
+  const isLogin = mode === "login";
+  return <div className="auth-screen">
+    <div className="auth-card">
+      <div className="auth-brand"><span className="brand-mark">C</span><span><strong>CineMind</strong><small>KNOW YOUR TASTE</small></span></div>
+      <span className="eyebrow">{isLogin ? "WELCOME BACK" : "START YOUR COLLECTION"}</span>
+      <h1>{isLogin ? "Sign in to your cinema." : "Create your account."}</h1>
+      <p className="auth-copy">CineMind keeps preferences, favourites, ratings, and your watchlist on one account so the multilingual engine can rank the live catalogue for you.</p>
+      <form className="auth-form" onSubmit={(event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const email = String(form.get("email") || "");
+        const password = String(form.get("password") || "");
+        if (isLogin) onLogin(email, password);
+        else onRegister(String(form.get("name") || ""), email, password);
       }}>
-        {mode === "register" && <input name="name" placeholder="Name" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />}
-        <input name="email" type="email" placeholder="Email" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
-        <input name="password" type="password" placeholder="Password" required minLength={6} style={{ width: "100%", marginBottom: 8, padding: 8 }} />
-        {error && <p style={{ color: "red" }}>{error}</p>}
-        <Button type="submit" disabled={loading}>{loading ? "..." : mode === "login" ? "Sign in" : "Create account"}</Button>
+        {!isLogin && <label className="auth-field"><span>Name</span><input name="name" type="text" placeholder="Your name" autoComplete="name" required /></label>}
+        <label className="auth-field"><span>Email</span><input name="email" type="email" placeholder="you@example.com" autoComplete="email" required /></label>
+        <label className="auth-field"><span>Password</span><input name="password" type="password" placeholder="At least 6 characters" minLength={6} autoComplete={isLogin ? "current-password" : "new-password"} required /></label>
+        {error && <p className="auth-error" role="alert"><Icon name="info" size={15} />{error}</p>}
+        <Button type="submit" className="auth-submit" disabled={loading}>{loading ? "Please wait…" : isLogin ? "Sign in" : "Create account"}</Button>
       </form>
-      <button onClick={() => setMode(mode === "login" ? "register" : "login")} style={{ marginTop: 8, background: "none", border: "none", color: "inherit", cursor: "pointer" }}>
-        {mode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}
-      </button>
+      <button type="button" className="auth-switch" onClick={() => setMode(isLogin ? "register" : "login")}>{isLogin ? "New to CineMind? Create an account" : "Already have an account? Sign in"}</button>
+      <p className="auth-footnote">Live TMDB catalogue · preferences, favourites, and ratings sync to your account</p>
     </div>
   </div>;
 }
@@ -840,6 +942,8 @@ export default function App() {
   const [profile, setProfile] = usePersistentState<TasteProfile>("cinemind-profile", defaultProfile);
   const [discovery, setDiscovery] = usePersistentState<DiscoverySettings>("cinemind-discovery", defaultDiscovery);
   const [onboarding, setOnboarding] = useState(false);
+  const [profileMenu, setProfileMenu] = useState(false);
+  const onboardingDoneRef = useRef(false);
   const [mobileMenu, setMobileMenu] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [toast, setToast] = useState("");
@@ -948,7 +1052,7 @@ export default function App() {
     notify(removing ? "Movie feedback cleared." : `Preference updated: ${value === "more" ? "more" : "less"} like this.`);
   };
 
-  const navigate = (nextPage: Page) => { setPage(nextPage); setMobileMenu(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const navigate = (nextPage: Page) => { setPage(nextPage); setMobileMenu(false); setProfileMenu(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const openCatalogue = (seed: CatalogueSeed) => { setCatalogueSeed(seed); navigate("Catalogue"); };
 
   const resetAccountState = () => {
@@ -962,6 +1066,8 @@ export default function App() {
     setSelected(null);
     setSearchOpen(false);
     setOnboarding(false);
+    setProfileMenu(false);
+    onboardingDoneRef.current = false;
     setPage("Discover");
   };
 
@@ -1039,7 +1145,7 @@ export default function App() {
         setFavouriteIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...mappedFavourites.map((movie) => movie.id)])]);
         setSavedIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...mappedWatchlist.map((movie) => movie.id)])]);
         setRatings((current) => ({ ...(current && typeof current === "object" ? current : {}), ...ratingMap }));
-        if (!prefs.onboarding_completed) setOnboarding(true);
+        if (!prefs.onboarding_completed && !onboardingDoneRef.current) setOnboarding(true);
       });
     }).catch((error) => {
       if (cancelled) return;
@@ -1084,27 +1190,26 @@ export default function App() {
     return <Insights />;
   })();
 
-  const completeOnboarding = async (nextProfile: TasteProfile, onboardingRatings: Record<number, number>, onboardingFavourites: Movie[]) => {
+  const completeOnboarding = async (answers: OnboardingAnswers) => {
+    const nextProfile = answers.profile;
+    onboardingDoneRef.current = true;
     setProfile(nextProfile);
-    setRatings((current) => ({ ...(current && typeof current === "object" ? current : {}), ...onboardingRatings }));
     setFavouriteIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...nextProfile.favouriteMovies])]);
-    setDiscovery((current) => ({ ...current, mode: nextProfile.discovery === "familiar" ? "taste" : "surprise" }));
-    registerMovies(onboardingFavourites);
+    setDiscovery(answers.discovery);
+    registerMovies(answers.favourites);
     if (authToken) {
       try {
         await api.updatePreferences(authToken, {
           languages: nextProfile.languages,
           genres: nextProfile.genres,
-          moods: [],
-          release_period: "",
-          duration: "",
+          moods: answers.moods,
+          release_period: answers.releasePeriod,
+          duration: answers.duration,
           onboarding_completed: true,
         });
-        await Promise.all(onboardingFavourites.map(async (movie) => {
+        await Promise.all(answers.favourites.map(async (movie) => {
           const item = movieToCatalogueItem(movie);
           if (item) await api.addFavourite(authToken, item);
-          const rating = onboardingRatings[movie.id];
-          if (rating && movie.externalId) await api.addRating(authToken, "tmdb", movie.externalId, rating);
         }));
       } catch {
         notify("Your taste profile was saved locally; account sync failed.");
@@ -1124,7 +1229,17 @@ export default function App() {
       <button className="brand" onClick={() => navigate("Discover")}><span className="brand-mark">C</span><span><strong>CineMind</strong><small>KNOW YOUR TASTE</small></span></button>
       <nav>{nav.map((item) => <button key={item.name} className={page === item.name ? "active" : ""} onClick={() => navigate(item.name)}><Icon name={item.icon} /><span>{item.name}</span>{item.name === "Beyond Your Taste" && <i>NEW</i>}</button>)}</nav>
       <div className="sidebar-bottom">
-        {authUser && <button className="profile" onClick={handleLogout}><span>U</span><span><strong>{authUser.name}</strong><small>Logout</small></span><Icon name="arrow" /></button>}
+        {authUser && <div className="sidebar-profile">
+          <button className="profile" aria-haspopup="menu" aria-expanded={profileMenu} onClick={() => setProfileMenu((open) => !open)}><span>{authUser.name.slice(0, 1).toUpperCase()}</span><span><strong>{authUser.name}</strong><small>{authUser.email}</small></span><Icon name="arrow" /></button>
+          {profileMenu && <>
+            <button className="profile-menu-backdrop" aria-label="Close the account menu" onClick={() => setProfileMenu(false)} />
+            <div className="profile-menu" role="menu">
+              <div className="profile-menu-head"><strong>{authUser.name}</strong><span>{authUser.email}</span></div>
+              <button className="profile-menu-item" role="menuitem" onClick={() => { setProfileMenu(false); setOnboarding(true); }}><Icon name="spark" /><span>Edit taste profile</span></button>
+              <button className="profile-menu-item" role="menuitem" onClick={handleLogout}><Icon name="arrow" /><span>Log out</span></button>
+            </div>
+          </>}
+        </div>}
         <button className="taste-progress" onClick={() => setOnboarding(true)}><span className="progress-ring">{Math.min(100, 20 + safeProfile.genres.length * 7 + safeProfile.languages.length * 5 + safeProfile.favouriteMovies.length * 4)}</span><span><strong>Taste profile</strong><small>Languages, genres & favourites</small></span><Icon name="arrow" /></button>
         <button className="theme-toggle" onClick={() => setTheme(safeTheme === "dark" ? "light" : "dark")}><Icon name={safeTheme === "dark" ? "moon" : "sun"} /><span>{safeTheme === "dark" ? "Dark" : "Light"} theme</span><i><b /></i></button>
       </div>
@@ -1134,7 +1249,7 @@ export default function App() {
     <nav className="mobile-nav" aria-label="Primary mobile navigation">{nav.map((item) => <button key={item.name} onClick={() => navigate(item.name)} className={page === item.name ? "active" : ""}><Icon name={item.icon} /><span>{item.name.replace("Beyond Your Taste", "Beyond").replace("Mood & Context", "Mood").replace("My Collection", "Collection").replace("ML Insights", "Insights")}</span></button>)}</nav>
     {searchOpen && <SearchOverlay close={() => setSearchOpen(false)} openMovie={setSelected} />}
     {selected && <DetailModal movie={selected} close={() => setSelected(null)} props={props} />}
-    {onboarding && <Onboarding close={() => setOnboarding(false)} complete={completeOnboarding} languages={languages} />}
+    {onboarding && <Onboarding close={() => setOnboarding(false)} complete={completeOnboarding} languages={languages} genreOptions={genres} profile={safeProfile} discovery={safeDiscovery} />}
     {toast && <div className="toast" role="status"><Icon name="check" />{toast}<small>Account-backed when the backend is reachable</small></div>}
   </div>;
 }

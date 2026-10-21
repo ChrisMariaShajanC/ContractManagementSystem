@@ -489,6 +489,12 @@ _MOOD_GENRES: dict[str, set[str]] = {
     "relaxing": {"Comedy", "Family", "Romance", "Animation"},
     "adventurous": {"Adventure", "Action", "Fantasy", "Science Fiction"},
     "emotional": {"Drama", "Romance", "Music"},
+    "visual spectacle": {"Action", "Adventure", "Science Fiction", "Fantasy"},
+    "character drama": {"Drama", "Romance", "Comedy"},
+    "mind-bending": {"Science Fiction", "Mystery", "Thriller"},
+    "true stories": {"Documentary", "History", "Drama"},
+    "dark & gritty": {"Crime", "Thriller", "Horror", "Mystery"},
+    "light & charming": {"Comedy", "Family", "Romance", "Animation"},
 }
 
 _PERIOD_RANGES: dict[str, tuple[int | None, int | None]] = {
