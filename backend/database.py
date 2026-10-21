@@ -1,9 +1,13 @@
 import json
 import os
 from datetime import datetime
-from dotenv import load_dotenv
-load_dotenv()
 from pathlib import Path
+
+from dotenv import load_dotenv
+
+BACKEND_ENV = Path(__file__).resolve().parent / ".env"
+load_dotenv(BACKEND_ENV)
+load_dotenv()
 
 from sqlalchemy import (
     Column,

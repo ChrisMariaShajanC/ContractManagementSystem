@@ -1,16 +1,52 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { demoCatalogue, featuredMovie, type Movie } from "./data/catalogue";
-import { api, apiMovieToMovie } from "./lib/api";
-import type { MetricsResponse } from "./lib/api";
-import { defaultDiscovery, defaultProfile, explainRecommendation, rankMovies, rerankMoviesForDiversity, type DiscoverySettings, type Feedback, type RankedMovie, type RecommendationContext, type TasteProfile } from "./lib/recommender";
+import {
+  CSV_GENRES,
+  CSV_LANGUAGES,
+  createRegistryAdapter,
+  getRegisteredMovie,
+  getRegisteredMovies,
+  registerMovies,
+  type Movie,
+} from "./data/catalogue";
+import {
+  api,
+  apiMovieToMovie,
+  catalogueItemToMovie,
+  catalogueToMovie,
+  movieToCatalogueItem,
+  type CatalogueMovie,
+  type CatalogueResponse,
+  ApiError,
+} from "./lib/api";
+import type { AuthUser, MetricsResponse } from "./lib/api";
+import {
+  defaultDiscovery,
+  defaultProfile,
+  explainRecommendation,
+  rankMovies,
+  rerankMoviesForDiversity,
+  type DiscoverySettings,
+  type Feedback,
+  type RankedMovie,
+  type RecommendationContext,
+  type TasteProfile,
+} from "./lib/recommender";
 
 type Page = "Discover" | "For You" | "Beyond Your Taste" | "Mood & Context" | "My Collection" | "ML Insights" | "Catalogue";
 type FiltersState = { genre: string; language: string; year: string; runtime: string };
+type CatalogueSeed = { query?: string; genre?: string; language?: string } | null;
 
-const movies = demoCatalogue.getAll();
-const allGenres = demoCatalogue.getGenres();
-const allLanguages = demoCatalogue.getLanguages();
 const defaultFilters: FiltersState = { genre: "All", language: "All", year: "Any", runtime: "Any" };
+const registryCatalogue = createRegistryAdapter();
+
+const MOODS: Record<string, { genres: string[]; copy: string; symbol: string }> = {
+  "Feel-good": { genres: ["Comedy", "Family", "Romance"], copy: "Warm, hopeful stories", symbol: "☼" },
+  Suspenseful: { genres: ["Thriller", "Mystery", "Horror"], copy: "Tension that builds", symbol: "◒" },
+  "Thought-provoking": { genres: ["Drama", "Documentary", "Science Fiction"], copy: "Ideas that linger", symbol: "◇" },
+  Relaxing: { genres: ["Comedy", "Family", "Romance"], copy: "Gentle, easy pacing", symbol: "∿" },
+  Adventurous: { genres: ["Adventure", "Action", "Fantasy"], copy: "A sense of wonder", symbol: "↗" },
+  Emotional: { genres: ["Drama", "Romance", "Music"], copy: "Stories that move you", symbol: "○" },
+};
 
 function usePersistentState<T>(key: string, fallback: T) {
   const [value, setValue] = useState<T>(() => {
@@ -23,17 +59,30 @@ function usePersistentState<T>(key: string, fallback: T) {
     }
   });
   useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Local persistence is optional in this prototype. */ }
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* Local persistence is optional. */ }
   }, [key, value]);
   return [value, setValue] as const;
 }
 
 function applyMovieFilters(items: Movie[], filters: FiltersState) {
   return items.filter((movie) => {
-    const yearMatches = filters.year === "Any" || (filters.year === "2023–24" ? movie.year >= 2023 : filters.year === "2020–22" ? movie.year >= 2020 && movie.year <= 2022 : movie.year < 2020);
-    const runtimeMatches = filters.runtime === "Any" || (filters.runtime === "Under 100 min" ? movie.runtimeMinutes < 100 : filters.runtime === "100–120 min" ? movie.runtimeMinutes >= 100 && movie.runtimeMinutes <= 120 : movie.runtimeMinutes > 120);
-    return (filters.genre === "All" || movie.genres.includes(filters.genre)) && (filters.language === "All" || movie.language === filters.language) && yearMatches && runtimeMatches;
+    const yearMatches = filters.year === "Any" || (filters.year === "2020s" ? movie.year >= 2020 : filters.year === "2010s" ? movie.year >= 2010 && movie.year <= 2019 : filters.year === "2000s" ? movie.year >= 2000 && movie.year <= 2009 : movie.year > 0 && movie.year < 2000);
+    const runtimeMatches = filters.runtime === "Any" || movie.runtimeMinutes === 0 || (filters.runtime === "Under 100 min" ? movie.runtimeMinutes < 100 : filters.runtime === "100–120 min" ? movie.runtimeMinutes >= 100 && movie.runtimeMinutes <= 120 : movie.runtimeMinutes > 120);
+    const languageMatches = filters.language === "All" || movie.language === filters.language || movie.languageCode === filters.language;
+    return (filters.genre === "All" || movie.genres.includes(filters.genre)) && languageMatches && yearMatches && runtimeMatches;
   });
+}
+
+function dedupeMovies(items: Movie[]) {
+  const map = new Map<number, Movie>();
+  items.forEach((movie) => map.set(movie.id, movie));
+  return [...map.values()];
+}
+
+function uniqueCatalogueResults(pages: CatalogueResponse[]) {
+  const map = new Map<string, CatalogueMovie>();
+  pages.forEach((page) => page.results.forEach((movie) => map.set(String(movie.external_id), movie)));
+  return [...map.values()];
 }
 
 const nav: { name: Page; icon: string }[] = [
@@ -62,6 +111,7 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     arrow: <path d="M5 12h14m-5-5 5 5-5 5" />,
     menu: <path d="M4 7h16M4 12h16M4 17h16" />,
     star: <path d="m12 3 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9L12 3Z" />,
+    globe: <><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" /></>,
   };
   return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">{paths[name]}</svg>;
 }
@@ -78,20 +128,25 @@ function Section({ title, kicker, children, action }: { title: string; kicker?: 
   return <section className="section"><div className="section-head"><div>{kicker && <span className="eyebrow">{kicker}</span>}<h2>{title}</h2></div>{action}</div>{children}</section>;
 }
 
+function Poster({ movie }: { movie: Movie }) {
+  return <img src={movie.image} alt="" loading="lazy" onError={(event) => { event.currentTarget.src = "/favicon.svg"; }} />;
+}
+
 function MovieCard({ movie, onOpen, saved, onSave, favourite, onFavourite, explanation, showReason = false, rank, hideMatch = false }: { movie: Movie; onOpen: (m: Movie) => void; saved: boolean; onSave: (id: number) => void; favourite?: boolean; onFavourite?: (id: number) => void; explanation?: string; showReason?: boolean; rank?: number; hideMatch?: boolean }) {
   return <article className="movie-card">
     <button className="poster-button" onClick={() => onOpen(movie)} aria-label={`Open details for ${movie.title}`}>
-      <img src={movie.image} alt="" />
+      <Poster movie={movie} />
       <span className="poster-shade" />
       {rank && <span className="rank">{String(rank).padStart(2, "0")}</span>}
-      {!hideMatch && <span className="match">Curated for you</span>}
+      {!hideMatch && <span className="match">{movie.source === "tmdb" ? "TMDB catalogue" : "MovieLens model"}</span>}
       <span className="poster-open"><Icon name="arrow" /></span>
     </button>
     <div className="movie-copy">
-      <div className="movie-title-row"><div><h3>{movie.title}</h3><p>{movie.year} · {movie.runtime} · {movie.genres[0]}</p></div>
+      <div className="movie-title-row"><div><h3>{movie.title}</h3><p>{movie.year > 0 ? movie.year : "Year unknown"} · {movie.language} · {movie.genres.slice(0, 2).join(" · ") || "Film"}</p></div>
         <div className="card-actions">{onFavourite && <button className={`save ${favourite ? "saved" : ""}`} onClick={() => onFavourite(movie.id)} aria-label={favourite ? "Remove from favourites" : "Add to favourites"}><Icon name="heart" size={15} /></button>}<button className={`save ${saved ? "saved" : ""}`} onClick={() => onSave(movie.id)} aria-label={saved ? "Remove from watchlist" : "Add to watchlist"}><Icon name={saved ? "check" : "plus"} size={17} /></button></div>
       </div>
-      {showReason && <p className="reason"><Icon name="spark" size={14} />{explanation || `Curated for its ${movie.moods[0]?.toLowerCase()} sample tag.`}</p>}
+      <div className="card-meta"><span className="card-score"><Icon name="star" size={11} />{movie.score}</span>{movie.voteCount ? <small>{movie.voteCount.toLocaleString()} votes</small> : null}</div>
+      {showReason && <p className="reason"><Icon name="spark" size={14} />{explanation || movie.explanation || `Selected from the live catalogue for its ${movie.genres[0]?.toLowerCase() || "cinematic"} profile.`}</p>}
     </div>
   </article>;
 }
@@ -100,93 +155,19 @@ function MovieGrid({ items, ...props }: { items: Movie[]; onOpen: (m: Movie) => 
   return <div className={`movie-grid ${props.className || ""}`}>{items.map((m, i) => <MovieCard key={m.id} movie={m} onOpen={props.onOpen} saved={props.saved.has(m.id)} onSave={props.onSave} favourite={props.favourites?.has(m.id)} onFavourite={props.onFavourite} explanation={props.explanation?.(m)} showReason={props.showReason} rank={props.ranked ? i + 1 : undefined} hideMatch={props.hideMatch} />)}</div>;
 }
 
-function Filters({ value, onChange, includeSort = false }: { value: FiltersState; onChange: (filters: FiltersState) => void; includeSort?: boolean }) {
+function Filters({ value, onChange, genres, languages, includeSort = false }: { value: FiltersState; onChange: (filters: FiltersState) => void; genres: string[]; languages: Record<string, string>; includeSort?: boolean }) {
   return <div className="filters">
-    <select aria-label="Genre" value={value.genre} onChange={(e) => onChange({ ...value, genre: e.target.value })}><option value="All">All genres</option>{allGenres.map((genre) => <option key={genre}>{genre}</option>)}</select>
-    <select aria-label="Language" value={value.language} onChange={(e) => onChange({ ...value, language: e.target.value })}><option value="All">All languages</option>{allLanguages.map((language) => <option key={language}>{language}</option>)}</select>
-    <select aria-label="Release period" value={value.year} onChange={(e) => onChange({ ...value, year: e.target.value })}>{["Any", "2023–24", "2020–22", "Before 2020"].map((year) => <option key={year}>{year}</option>)}</select>
+    <select aria-label="Genre" value={value.genre} onChange={(e) => onChange({ ...value, genre: e.target.value })}><option value="All">All genres</option>{genres.map((genre) => <option key={genre}>{genre}</option>)}</select>
+    <select aria-label="Language" value={value.language} onChange={(e) => onChange({ ...value, language: e.target.value })}><option value="All">All languages</option>{Object.entries(languages).map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select>
+    <select aria-label="Release period" value={value.year} onChange={(e) => onChange({ ...value, year: e.target.value })}>{["Any", "2020s", "2010s", "2000s", "Before 2000"].map((year) => <option key={year}>{year}</option>)}</select>
     <select aria-label="Runtime" value={value.runtime} onChange={(e) => onChange({ ...value, runtime: e.target.value })}>{["Any", "Under 100 min", "100–120 min", "Over 120 min"].map((runtime) => <option key={runtime}>{runtime}</option>)}</select>
-    {includeSort && <span className="filter-note">Filters update instantly</span>}
+    {includeSort && <span className="filter-note">Filters combine with live TMDB metadata</span>}
   </div>;
 }
 
-function Discover(props: PageProps) {
-  const [query, setQuery] = useState("");
-  const [realSearch, setRealSearch] = useState<Movie[]>([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchError, setSearchError] = useState<string | null>(null);
-  const [popularMovies, setPopularMovies] = useState<Movie[]>([]);
-  const [popularLoading, setPopularLoading] = useState(false);
-  const [popularError, setPopularError] = useState<string | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    setPopularLoading(true);
-    setPopularError(null);
-    api.popularMovies(6).then((data) => {
-      if (!cancelled) setPopularMovies(data.map(apiMovieToMovie));
-    }).catch((error) => {
-      if (!cancelled) setPopularError(error instanceof Error ? error.message : "Failed to load popular movies");
-    }).finally(() => {
-      if (!cancelled) setPopularLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, []);
-  useEffect(() => {
-    if (!query.trim()) {
-      setRealSearch([]);
-      setSearchError(null);
-      setSearchLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setSearchLoading(true);
-    setSearchError(null);
-    api.searchMovies({ search: query, limit: 20 }).then((data) => {
-      if (!cancelled) setRealSearch(data.map(apiMovieToMovie));
-    }).catch((error) => {
-      if (!cancelled) setSearchError(error instanceof Error ? error.message : "Search failed");
-    }).finally(() => {
-      if (!cancelled) setSearchLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, [query]);
-  const found = query.trim() ? realSearch : [];
-  const context = recommendationContext(props);
-  const picked = useMemo(() => rerankMoviesForDiversity(movies, context, 6).map((item) => item.movie), [props.profile, props.ratings, props.feedback, props.discovery]);
-  const hiddenGems = useMemo(() => [...movies].sort((a, b) => a.popularity - b.popularity || Number(b.score) - Number(a.score)).slice(0, 4), []);
-  const referenceMovie = useMemo(() => {
-    const favouriteId = [...props.favourites][0] ?? props.profile.favouriteMovies[0];
-    if (favouriteId) return demoCatalogue.getById(favouriteId);
-    const highlyRatedId = Object.entries(props.ratings).filter(([, rating]) => rating >= 4).sort((a, b) => b[1] - a[1])[0]?.[0];
-    return highlyRatedId ? demoCatalogue.getById(Number(highlyRatedId)) : undefined;
-  }, [props.favourites, props.profile.favouriteMovies, props.ratings]);
-  const related = useMemo(() => referenceMovie
-    ? rerankMoviesForDiversity(movies.filter((movie) => movie.id !== referenceMovie.id && movie.genres.some((genre) => referenceMovie.genres.includes(genre))), context, 5).map((item) => item.movie)
-    : [], [referenceMovie, props.profile, props.ratings, props.feedback, props.discovery]);
-  return <>
-    <div className="discover-intro">
-      <span className="eyebrow">YOUR EVENING, CURATED</span>
-      <h1>Stories worth<br /><em>getting lost in.</em></h1>
-      <p>Recommendations shaped by your taste—not everyone else’s.</p>
-      <div className="search" role="search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search films, genres, moods..." aria-label="Search the demonstration catalogue" aria-keyshortcuts="Control+K Meta+K" /><button type="button" onClick={props.openSearch} aria-label="Open catalogue search"><kbd>Ctrl / ⌘ K</kbd></button>{query && <button type="button" className="search-clear" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="close" size={15} /></button>}</div>
-    </div>
-    {query ? <Section title={`Search results � ${found.length}`}>{searchLoading ? <div className="loading-grid" aria-label="Searching movies">{[1, 2, 3].map((n) => <i key={n} />)}</div> : searchError ? <EmptyState icon="info" title="Search unavailable" copy={searchError} button="Retry" onAction={() => setQuery(query)} /> : found.length ? <MovieGrid items={found} onOpen={props.open} saved={props.saved} onSave={props.save} /> : <EmptyState icon="search" title="No catalogue matches" copy="Try another title, genre, language, mood, or theme." button="Clear search" onAction={() => setQuery("")} />}</Section> : <>
-      <section className="hero">
-        <img src={demoCatalogue.getById(featuredMovie.id)?.image || featuredMovie.image} alt="A lone figure crossing a vast cinematic landscape" />
-        <div className="hero-overlay" />
-        <div className="hero-content"><span className="sample-pill">SAMPLE FEATURE</span><p className="hero-meta">{featuredMovie.year} · {featuredMovie.runtime} · {featuredMovie.genres.join(", ")}</p><h2>A Field<br />of Silence</h2><p className="hero-overview">{featuredMovie.overview}</p><div className="hero-actions"><Button icon="play" onClick={() => props.open(featuredMovie)}>View details</Button><Button variant="secondary" icon={props.saved.has(featuredMovie.id) ? "check" : "plus"} onClick={() => props.save(featuredMovie.id)}>Watchlist</Button></div></div>
-        <div className="hero-match"><strong>Editor’s pick</strong><span>Personalized sample</span></div>
-      </section>
-      <Section kicker="PERSONALIZED · SIMULATED RANKING" title="Picked for you" action={<button className="text-link" onClick={() => props.navigate("For You")}>View all recommendations <Icon name="arrow" /></button>}><MovieGrid className="poster-row" items={picked} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /></Section>
-      <Section kicker="LOWER SAMPLE POPULARITY FIRST" title="Hidden gems"><div className="landscape-row">{hiddenGems.map((m) => <button key={m.id} className="landscape-card" onClick={() => props.open(m)}><img src={m.image} alt="" /><span><small>{m.genres.join(" · ")}</small><strong>{m.title}</strong><em>Sample popularity · {m.popularity}/100</em></span></button>)}</div></Section>
-      {referenceMovie && related.length ? <section className="because"><div><span className="eyebrow">BECAUSE YOU LOVED</span><h2>{referenceMovie.title}</h2><p>More sample films sharing {referenceMovie.genres.join(" and ")}, reranked with your current preferences.</p><Button variant="secondary" onClick={() => props.open(referenceMovie)}>Revisit this film <Icon name="arrow" /></Button></div><MovieGrid className="poster-row" items={related} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /></section> : <Section kicker="BECAUSE YOU LOVED" title="Teach CineMind what belongs here"><EmptyState icon="heart" title="No recommendation thread yet" copy="Favourite or rate a compatible sample film highly to generate this catalogue-based thread." button="Explore recommendations" onAction={() => props.navigate("For You")} /></Section>}
-      <Section kicker="STEP OUTSIDE THE FAMILIAR" title="Explore different genres"><div className="genre-row">{["Sci-Fi", "Documentary", "Western", "Comedy", "History"].map((g, i) => <button key={g} className="genre-tile" onClick={() => setQuery(g)}><span>0{i + 1}</span><strong>{g}</strong><small>Explore collection <Icon name="arrow" size={14} /></small></button>)}</div></Section>
-      <Section kicker="BACKEND POPULAR MOVIES" title="Popular from trained model">{popularLoading ? <div className="loading-grid" aria-label="Loading popular movies">{[1, 2, 3].map((n) => <i key={n} />)}</div> : popularError ? <EmptyState icon="info" title="Popular movies unavailable" copy={popularError} button="Retry" onAction={() => window.location.reload()} /> : popularMovies.length ? <MovieGrid className="poster-row" items={popularMovies} onOpen={props.open} saved={props.saved} onSave={props.save} hideMatch /> : <EmptyState icon="search" title="No popular movies returned" copy="The backend returned no popular movies." button="Retry" onAction={() => window.location.reload()} />}</Section>
-    </>}
-  </>;
-}
-
 type PageProps = {
+  token: string;
+  user: AuthUser | null;
   open: (m: Movie) => void;
   saved: Set<number>;
   save: (id: number) => void;
@@ -203,142 +184,324 @@ type PageProps = {
   notify: (message: string) => void;
   navigate: (page: Page) => void;
   openSearch: () => void;
+  openCatalogue: (seed: CatalogueSeed) => void;
+  languages: Record<string, string>;
+  genres: string[];
+  genreMap: Record<string, string>;
 };
 
 function recommendationContext(props: PageProps): RecommendationContext {
-  return { settings: props.discovery, profile: props.profile, feedback: props.feedback, ratings: props.ratings, catalogue: demoCatalogue };
+  return { settings: props.discovery, profile: props.profile, feedback: props.feedback, ratings: props.ratings, catalogue: registryCatalogue };
+}
+
+function Discover(props: PageProps) {
+  const [query, setQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Movie[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [trendingRaw, setTrendingRaw] = useState<CatalogueMovie[]>([]);
+  const [popular, setPopular] = useState<Movie[]>([]);
+  const [gems, setGems] = useState<Movie[]>([]);
+  const [personal, setPersonal] = useState<Movie[]>([]);
+  const [personalLoading, setPersonalLoading] = useState(true);
+  const [personalError, setPersonalError] = useState<string | null>(null);
+  const [mlPopular, setMlPopular] = useState<Movie[]>([]);
+  const [related, setRelated] = useState<Movie[]>([]);
+  const [catalogueError, setCatalogueError] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setCatalogueError(null);
+    Promise.all([
+      api.catalogueTrending({ time_window: "week" }),
+      api.cataloguePopular({ page: 1 }),
+      api.catalogueDiscover({ sort_by: "vote_average.desc", vote_count_gte: 250, page: 1 }),
+    ]).then(([trending, popularData, quality]) => {
+      if (cancelled) return;
+      setTrendingRaw(trending.results.slice(0, 10));
+      setPopular(popularData.results.map(catalogueToMovie));
+      const gemItems = [...quality.results].sort((a, b) => (a.popularity ?? 0) - (b.popularity ?? 0)).slice(0, 4);
+      setGems(gemItems.map(catalogueToMovie));
+    }).catch((error) => {
+      if (!cancelled) setCatalogueError(error instanceof Error ? error.message : "Catalogue unavailable");
+    });
+    return () => { cancelled = true; };
+  }, [refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPersonalLoading(true);
+    setPersonalError(null);
+    api.personalized(props.token, 10, props.discovery.diversity / 100, {
+      familiarity: props.discovery.familiarity / 100,
+      novelty: props.discovery.novelty / 100,
+      popularity: props.discovery.popularity / 100,
+    }).then((data) => {
+      if (!cancelled) setPersonal(data.recommendations.map(catalogueToMovie));
+    }).catch((error) => {
+      if (!cancelled) setPersonalError(error instanceof Error ? error.message : "Personalized recommendations unavailable");
+    }).finally(() => {
+      if (!cancelled) setPersonalLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [props.token, props.discovery, refresh]);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.popularMovies(6).then((data) => {
+      if (!cancelled) setMlPopular(data.map(apiMovieToMovie));
+    }).catch(() => { if (!cancelled) setMlPopular([]); });
+    return () => { cancelled = true; };
+  }, [refresh]);
+
+  const referenceFavourite = useMemo(() => {
+    const ids = [...props.favourites];
+    return getRegisteredMovies(ids).find((movie) => movie.externalId) || null;
+  }, [props.favourites]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!referenceFavourite?.externalId) {
+      setRelated([]);
+      return;
+    }
+    api.catalogueMovieRecommendations(referenceFavourite.externalId, 1).then((data) => {
+      if (!cancelled) setRelated(data.results.slice(0, 5).map(catalogueToMovie));
+    }).catch(() => { if (!cancelled) setRelated([]); });
+    return () => { cancelled = true; };
+  }, [referenceFavourite?.externalId]);
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    setSearchError(null);
+    const timer = window.setTimeout(() => {
+      api.catalogueSearch({ q: trimmed, page: 1 }).then((data) => {
+        if (!cancelled) setSearchResults(data.results.slice(0, 12).map(catalogueToMovie));
+      }).catch((error) => {
+        if (!cancelled) setSearchError(error instanceof Error ? error.message : "Search failed");
+      }).finally(() => {
+        if (!cancelled) setSearchLoading(false);
+      });
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query]);
+
+  const hero = trendingRaw[0] ? catalogueToMovie(trendingRaw[0]) : null;
+  const heroRaw = trendingRaw[0];
+
+  return <>
+    <div className="discover-intro">
+      <span className="eyebrow">MULTILINGUAL DISCOVERY · LIVE TMDB CATALOGUE</span>
+      <h1>Stories worth<br /><em>getting lost in.</em></h1>
+      <p>Recommendations shaped by your taste across Malayalam, Tamil, Hindi, English, Korean, Japanese and more.</p>
+      <div className="search" role="search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search films, languages, genres..." aria-label="Search the live TMDB catalogue" /><button type="button" onClick={props.openSearch} aria-label="Open catalogue search"><kbd>Ctrl / ⌘ K</kbd></button>{query && <button type="button" className="search-clear" onClick={() => setQuery("")} aria-label="Clear search"><Icon name="close" size={15} /></button>}</div>
+    </div>
+    {query ? <Section title={`Search results · ${searchResults.length}`} action={<Button variant="secondary" onClick={() => props.openCatalogue({ query })}>Open full catalogue <Icon name="arrow" /></Button>}>{searchLoading ? <div className="loading-grid" aria-label="Searching movies">{[1, 2, 3].map((n) => <i key={n} />)}</div> : searchError ? <EmptyState icon="info" title="Search unavailable" copy={searchError} button="Retry" onAction={() => setQuery(query)} /> : searchResults.length ? <MovieGrid items={searchResults} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /> : <EmptyState icon="search" title="No catalogue matches" copy="Try another title, genre, language, or year." button="Clear search" onAction={() => setQuery("")} />}</Section> : <>
+      {hero && heroRaw ? <section className="hero">
+        <img src={heroRaw.backdrop_url || heroRaw.poster_url || "/favicon.svg"} alt="" />
+        <div className="hero-overlay" />
+        <div className="hero-content"><span className="sample-pill">TRENDING · {hero.language.toUpperCase()}</span><p className="hero-meta">{hero.year > 0 ? `${hero.year} · ` : ""}{hero.genres.join(", ")} · ★ {hero.score}/10</p><h2>{hero.title}</h2><p className="hero-overview">{hero.overview || "A live catalogue title trending on TMDB this week."}</p><div className="hero-actions"><Button icon="play" onClick={() => props.open(hero)}>View details</Button><Button variant="secondary" icon={props.saved.has(hero.id) ? "check" : "plus"} onClick={() => props.save(hero.id)}>Watchlist</Button></div></div>
+        <div className="hero-match"><strong>Live catalogue</strong><span>TMDB trending</span></div>
+      </section> : catalogueError ? <Section title="Catalogue unavailable"><EmptyState icon="info" title="Connect a movie catalogue" copy={catalogueError} button="Retry" onAction={() => setRefresh((value) => value + 1)} /></Section> : <div className="loading-grid" aria-label="Loading trending movies">{[1, 2, 3].map((n) => <i key={n} />)}</div>}
+      <Section kicker="PERSONALIZED · HYBRID RANKING" title="Picked for you" action={<button className="text-link" onClick={() => props.navigate("For You")}>View all recommendations <Icon name="arrow" /></button>}>
+        {personalLoading ? <div className="loading-grid" aria-label="Loading personalized recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : personalError ? <EmptyState icon="info" title="Personalized list unavailable" copy={personalError} button="Retry" onAction={() => setRefresh((value) => value + 1)} /> : personal.length ? <MovieGrid className="poster-row" items={personal} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} explanation={(movie) => movie.explanation || "Ranked by your language, genre, and interaction signals."} showReason /> : <EmptyState icon="spark" title="Finish onboarding" copy="Choose languages and genres so the hybrid engine can rank the catalogue for you." button="Build taste profile" onAction={() => props.navigate("For You")} />}
+      </Section>
+      <Section kicker="LOWER POPULARITY · STRONG RATINGS" title="Hidden gems from the catalogue">{gems.length ? <div className="landscape-row">{gems.map((movie) => <button key={movie.id} className="landscape-card" onClick={() => props.open(movie)}><Poster movie={movie} /><span><small>{movie.genres.join(" · ")} · {movie.language}</small><strong>{movie.title}</strong><em>TMDB popularity · {movie.popularity}/100 · ★ {movie.score}</em></span></button>)}</div> : <EmptyState icon="search" title="No hidden gems loaded" copy="The catalogue did not return enough highly rated titles." button="Retry" onAction={() => setRefresh((value) => value + 1)} />}</Section>
+      {referenceFavourite && related.length ? <section className="because"><div><span className="eyebrow">BECAUSE YOU LOVED</span><h2>{referenceFavourite.title}</h2><p>Films TMDB recommends in the same orbit, ranked against your current taste profile.</p><Button variant="secondary" onClick={() => props.open(referenceFavourite)}>Revisit this film <Icon name="arrow" /></Button></div><MovieGrid className="poster-row" items={related} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /></section> : <Section kicker="BECAUSE YOU LOVED" title="Teach CineMind what belongs here"><EmptyState icon="heart" title="No recommendation thread yet" copy="Favourite a film from the catalogue to generate a real TMDB-powered thread." button="Explore the catalogue" onAction={() => props.openCatalogue(null)} /></Section>}
+      <Section kicker="STEP OUTSIDE YOUR LANGUAGE" title="Explore different genres"><div className="genre-row">{["Science Fiction", "Documentary", "Drama", "Comedy", "Romance"].map((genre, index) => <button key={genre} className="genre-tile" onClick={() => props.openCatalogue({ genre })}><span>0{index + 1}</span><strong>{genre}</strong><small>Explore catalogue <Icon name="arrow" size={14} /></small></button>)}</div></Section>
+      <Section kicker="TRAINED MOVIELENS MODEL · MATCHED TO TMDB" title="Popular from trained model">{mlPopular.length ? <><MovieGrid className="poster-row" items={mlPopular} onOpen={props.open} saved={props.saved} onSave={props.save} hideMatch /><p className="catalogue-attribution">MovieLens recommendations are matched to TMDB posters and metadata. This product uses the TMDB API but is not endorsed or certified by TMDB.</p></> : <EmptyState icon="search" title="No model popularity returned" copy="The trained backend did not return popular titles." button="Retry" onAction={() => setRefresh((value) => value + 1)} />}</Section>
+    </>}
+  </>;
 }
 
 function ForYou(props: PageProps) {
   const [sort, setSort] = useState("relevance");
   const [filters, setFilters] = useState(defaultFilters);
-  const [loading, setLoading] = useState(false);
-  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [refresh, setRefresh] = useState(0);
   const [backendMovies, setBackendMovies] = useState<Movie[]>([]);
-  const [backendLoading, setBackendLoading] = useState(false);
+  const [backendLoading, setBackendLoading] = useState(true);
   const [backendError, setBackendError] = useState<string | null>(null);
-  const [backendRetry, setBackendRetry] = useState(0);
+  const [ml, setMl] = useState<Movie[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api.personalized(props.token, 30, props.discovery.diversity / 100, {
+      familiarity: props.discovery.familiarity / 100,
+      novelty: props.discovery.novelty / 100,
+      popularity: props.discovery.popularity / 100,
+    }).then((data) => {
+      if (!cancelled) setBackendMovies(data.recommendations.map(catalogueToMovie));
+    }).catch((caught) => {
+      if (!cancelled) setError(caught instanceof Error ? caught.message : "Recommendations unavailable");
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [props.token, props.discovery, refresh]);
+
   useEffect(() => {
     let cancelled = false;
     setBackendLoading(true);
     setBackendError(null);
     api.recommendations(1, 8).then((data) => {
-      if (!cancelled) setBackendMovies(data.recommendations.map(apiMovieToMovie));
-    }).catch((error) => {
-      if (!cancelled) setBackendError(error instanceof Error ? error.message : "Recommendations unavailable");
+      if (!cancelled) setMl(data.recommendations.map(apiMovieToMovie));
+    }).catch((caught) => {
+      if (!cancelled) setBackendError(caught instanceof Error ? caught.message : "Recommendations unavailable");
     }).finally(() => {
       if (!cancelled) setBackendLoading(false);
     });
     return () => { cancelled = true; };
-  }, [backendRetry]);
+  }, [refresh]);
+
   const context = recommendationContext(props);
   const sorted = useMemo<RankedMovie[]>(() => {
-    const filtered = applyMovieFilters(movies, filters);
+    const filtered = applyMovieFilters(backendMovies, filters);
     const ranked = sort === "relevance" ? rerankMoviesForDiversity(filtered, context) : rankMovies(filtered, context);
     return ranked.sort((a, b) => {
-      if (sort === "rating") return +b.movie.score - +a.movie.score;
+      if (sort === "rating") return Number(b.movie.voteAverage || 0) - Number(a.movie.voteAverage || 0);
       if (sort === "year") return b.movie.year - a.movie.year;
-      if (sort === "runtime") return a.movie.runtimeMinutes - b.movie.runtimeMinutes;
       return 0;
     });
-  }, [filters, sort, props.discovery, props.profile, props.feedback, props.ratings, refreshVersion]);
-  const refresh = () => {
-    setLoading(true);
-    window.setTimeout(() => {
-      setRefreshVersion((version) => version + 1);
-      setLoading(false);
-      props.notify("Demonstration recommendations recalculated from your current local preferences.");
-    }, 550);
+  }, [backendMovies, filters, sort, props.discovery, props.profile, props.feedback, props.ratings]);
+
+  const refreshRecommendations = () => {
+    setRefresh((value) => value + 1);
+    props.notify("Recommendations refreshed from the multilingual hybrid engine.");
   };
+
   return <>
-    <PageHeader eyebrow="PERSONALIZED FOR ALEX" title="Your cinema, refined." copy="Every recommendation includes the metadata signals behind it. Ranking and genre-diversity reranking are simulated locally for this prototype." action={<Button variant="secondary" icon="spark" onClick={refresh} disabled={loading}>{loading ? "Recalculating…" : "Refresh recommendations"}</Button>} />
-    <div className="preference-summary"><span>YOUR CURRENT SIGNAL</span><strong>{props.profile.genres.length ? props.profile.genres.slice(0, 3).join(" · ") : "No genres selected yet"}</strong><p>{Object.keys(props.feedback).length} feedback signals · {Object.keys(props.ratings).length} personal ratings · Discovery set to {props.profile.discovery}</p></div>
-    <div className="toolbar"><Filters value={filters} onChange={setFilters} /><div className="segmented">{[["relevance", "Relevance"], ["rating", "Rating"], ["year", "Year"], ["runtime", "Runtime"]].map(([value, label]) => <button key={value} className={sort === value ? "active" : ""} onClick={() => setSort(value)}>{label}</button>)}</div></div>
-    <Section kicker="BACKEND RECOMMENDATIONS" title="From trained model (MovieLens user 1)">{backendLoading ? <div className="loading-grid" aria-label="Loading recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : backendError ? <EmptyState icon="info" title="Recommendations unavailable" copy={backendError} button="Retry" onAction={() => setBackendRetry((v) => v + 1)} /> : backendMovies.length ? <MovieGrid items={backendMovies} onOpen={props.open} saved={props.saved} onSave={props.save} hideMatch /> : <EmptyState icon="search" title="No recommendations returned" copy="The backend returned no recommendations." button="Retry" onAction={() => setBackendRetry((v) => v + 1)} />}</Section>
-    {loading ? <div className="loading-grid" aria-label="Refreshing recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : sorted.length === 0 ? <EmptyState icon="search" title="No films match these filters" copy="Try broadening one of the filters to see more recommendations." button="Reset filters" onAction={() => setFilters(defaultFilters)} /> :
-    <div className="recommendation-list">{sorted.slice(0, 8).map((ranked) => <article className="recommendation" key={ranked.movie.id}>
-      <button className="rec-poster" onClick={() => props.open(ranked.movie)}><img src={ranked.movie.image} alt="" /><span>Demo ranking</span></button>
-      <div className="rec-body"><div><span className="eyebrow">{ranked.movie.genres.join(" · ")}</span><h2>{ranked.movie.title}</h2><p>{ranked.movie.year} · {ranked.movie.runtime} · Sample rating {ranked.movie.score}</p></div><div className="why"><Icon name="spark" /><div><strong>Why recommended?</strong><p>{ranked.explanation}</p></div></div>
-        <div className="rec-actions"><Button variant="secondary" icon="plus" onClick={() => props.save(ranked.movie.id)}>{props.saved.has(ranked.movie.id) ? "In watchlist" : "Watchlist"}</Button><button className={props.feedback[ranked.movie.id] === "more" ? "selected" : ""} onClick={() => props.setMovieFeedback(ranked.movie.id, "more")}>＋<i>More like this</i></button><button className={props.feedback[ranked.movie.id] === "less" ? "selected" : ""} onClick={() => props.setMovieFeedback(ranked.movie.id, "less")}>−<i>Less like this</i></button><button onClick={() => props.open(ranked.movie)}><Icon name="info" size={14} /><i>Why recommended?</i></button></div>
-      </div>
-    </article>)}</div>}
+    <PageHeader eyebrow={`PERSONALIZED FOR ${(props.user?.name || "YOU").toUpperCase()}`} title="Your cinema, refined." copy="Hybrid ranking over the live TMDB catalogue: language and genre preferences, favourites, app-level collaborative filtering, trained MovieLens priors, and diversity reranking." action={<Button variant="secondary" icon="spark" onClick={refreshRecommendations} disabled={loading}>{loading ? "Ranking…" : "Refresh recommendations"}</Button>} />
+    <div className="preference-summary"><span>YOUR CURRENT SIGNAL</span><strong>{props.profile.genres.length ? props.profile.genres.slice(0, 3).join(" · ") : "No genres selected yet"}{props.profile.languages.length ? ` · ${props.profile.languages.map((code) => props.languages[code] || code).slice(0, 3).join(" / ")}` : ""}</strong><p>{Object.keys(props.feedback).length} feedback signals · {Object.keys(props.ratings).length} personal ratings · diversity {props.discovery.diversity}% · collaborative filtering activates as more viewers rate films.</p></div>
+    <div className="toolbar"><Filters value={filters} onChange={setFilters} genres={props.genres} languages={props.languages} /><div className="segmented">{[["relevance", "Relevance"], ["rating", "Rating"], ["year", "Year"]].map(([value, label]) => <button key={value} className={sort === value ? "active" : ""} onClick={() => setSort(value)}>{label}</button>)}</div></div>
+    {loading ? <div className="loading-grid" aria-label="Ranking the catalogue">{[1, 2, 3].map((n) => <i key={n} />)}</div> : error ? <EmptyState icon="info" title="Recommendations unavailable" copy={error} button="Retry" onAction={refreshRecommendations} /> : sorted.length === 0 ? <EmptyState icon="search" title="No films match these filters" copy="Try broadening one of the filters to see more recommendations." button="Reset filters" onAction={() => setFilters(defaultFilters)} /> :
+      <div className="recommendation-list">{sorted.slice(0, 12).map((ranked) => <article className="recommendation" key={ranked.movie.id}>
+        <button className="rec-poster" onClick={() => props.open(ranked.movie)}><Poster movie={ranked.movie} /><span>{ranked.movie.source === "tmdb" ? "Live catalogue" : "MovieLens"}</span></button>
+        <div className="rec-body"><div><span className="eyebrow">{ranked.movie.genres.join(" · ")} · {ranked.movie.language}</span><h2>{ranked.movie.title}</h2><p>{ranked.movie.year > 0 ? `${ranked.movie.year} · ` : ""}★ {ranked.movie.score}/10{ranked.movie.voteCount ? ` · ${ranked.movie.voteCount.toLocaleString()} votes` : ""}</p></div><div className="why"><Icon name="spark" /><div><strong>Why recommended?</strong><p>{ranked.movie.explanation || ranked.explanation}</p></div></div>
+          <div className="rec-actions"><Button variant="secondary" icon="plus" onClick={() => props.save(ranked.movie.id)}>{props.saved.has(ranked.movie.id) ? "In watchlist" : "Watchlist"}</Button><button className={props.feedback[ranked.movie.id] === "more" ? "selected" : ""} onClick={() => props.setMovieFeedback(ranked.movie.id, "more")}>＋<i>More like this</i></button><button className={props.feedback[ranked.movie.id] === "less" ? "selected" : ""} onClick={() => props.setMovieFeedback(ranked.movie.id, "less")}>−<i>Less like this</i></button><button onClick={() => props.open(ranked.movie)}><Icon name="info" size={14} /><i>Why recommended?</i></button></div>
+        </div>
+      </article>)}</div>}
+    <Section kicker="TRAINED HYBRID MODEL · ENRICHED WITH TMDB" title="MovieLens user 1 recommendations">{backendLoading ? <div className="loading-grid" aria-label="Loading model recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : backendError ? <EmptyState icon="info" title="Model recommendations unavailable" copy={backendError} button="Retry" onAction={refreshRecommendations} /> : ml.length ? <MovieGrid items={ml} onOpen={props.open} saved={props.saved} onSave={props.save} hideMatch /> : <EmptyState icon="search" title="No recommendations returned" copy="The trained backend returned no recommendations." button="Retry" onAction={refreshRecommendations} />}</Section>
   </>;
 }
 
 function Beyond(props: PageProps) {
   const settings = props.discovery;
-  const [backendMovies, setBackendMovies] = useState<Movie[]>([]);
-  const [backendLoading, setBackendLoading] = useState(false);
-  const [backendError, setBackendError] = useState<string | null>(null);
-  const [diverseItems, setDiverseItems] = useState<{ movie: Movie; explanation: string }[]>([]);
-  const [diverseLoading, setDiverseLoading] = useState(false);
-  const [diverseError, setDiverseError] = useState<string | null>(null);
-  const [diverseRetry, setDiverseRetry] = useState(0);
+  const [items, setItems] = useState<{ movie: Movie; explanation: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  const [mlItems, setMlItems] = useState<{ movie: Movie; explanation: string }[]>([]);
+  const [mlLoading, setMlLoading] = useState(true);
+  const [mlError, setMlError] = useState<string | null>(null);
+
   useEffect(() => {
     let cancelled = false;
-    setBackendLoading(true);
-    setBackendError(null);
-    api.recommendations(1, 8).then((data) => {
-      if (!cancelled) setBackendMovies(data.recommendations.map(apiMovieToMovie));
-    }).catch((error) => {
-      if (!cancelled) setBackendError(error instanceof Error ? error.message : "Recommendations unavailable");
-    }).finally(() => {
-      if (!cancelled) setBackendLoading(false);
-    });
-    return () => { cancelled = true; };
-  }, []);
+    setLoading(true);
+    setError(null);
+    const timer = window.setTimeout(() => {
+      api.personalizedDiverse(props.token, 12, settings.diversity / 100, {
+        familiarity: settings.familiarity / 100,
+        novelty: settings.novelty / 100,
+        popularity: settings.popularity / 100,
+      }).then((data) => {
+        if (!cancelled) setItems(data.recommendations.map((item) => ({ movie: catalogueToMovie(item), explanation: item.explanation || "Diversity reranking balances relevance and genre/language variety." })));
+      }).catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "Diverse recommendations unavailable");
+      }).finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [props.token, settings, retry]);
+
   useEffect(() => {
     let cancelled = false;
-    setDiverseLoading(true);
-    setDiverseError(null);
+    setMlLoading(true);
+    setMlError(null);
     api.diverseRecommendations(1, settings.diversity / 100, 8).then((data) => {
-      if (!cancelled) setDiverseItems(data.recommendations.map((item) => ({
-        movie: apiMovieToMovie(item),
-        explanation: item.explanation || "MMR reranking balances relevance and genre diversity.",
-      })));
-    }).catch((error) => {
-      if (!cancelled) setDiverseError(error instanceof Error ? error.message : "Diverse recommendations unavailable");
+      if (!cancelled) setMlItems(data.recommendations.map((item) => ({ movie: apiMovieToMovie(item), explanation: item.explanation || "MMR reranking balances relevance and genre diversity." })));
+    }).catch((caught) => {
+      if (!cancelled) setMlError(caught instanceof Error ? caught.message : "Diverse model recommendations unavailable");
     }).finally(() => {
-      if (!cancelled) setDiverseLoading(false);
+      if (!cancelled) setMlLoading(false);
     });
     return () => { cancelled = true; };
-  }, [settings.diversity, diverseRetry]);
+  }, [settings.diversity, retry]);
+
   const update = (key: keyof DiscoverySettings, value: number | string) => props.setDiscovery((current) => ({ ...current, [key]: value }));
-  const context = recommendationContext(props);
-  const selected = diverseItems.map((item) => item.movie);
-  const genreCounts = selected.slice(0, 6).flatMap((movie) => movie.genres).reduce<Record<string, number>>((counts, genre) => ({ ...counts, [genre]: (counts[genre] || 0) + 1 }), {});
+  const selected = items.map((item) => item.movie);
+  const genreCounts = selected.slice(0, 8).flatMap((movie) => movie.genres).reduce<Record<string, number>>((counts, genre) => ({ ...counts, [genre]: (counts[genre] || 0) + 1 }), {});
   const topGenres = Object.entries(genreCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([genre]) => genre);
+  const languages = [...new Set(selected.map((movie) => movie.language))].slice(0, 5);
   const summary = settings.mode === "surprise"
-    ? `Prioritizing ${settings.novelty > 60 ? "less-popular discoveries" : "balanced discoveries"} with ${settings.diversity > 60 ? "broader genre variety" : "a focused genre range"}.`
+    ? `Prioritizing ${settings.novelty > 60 ? "less-popular discoveries" : "balanced discoveries"} with ${settings.diversity > 60 ? "broader genre and language variety" : "a focused genre range"}.`
     : `Prioritizing familiar ${props.profile.genres.slice(0, 2).join(" and ") || "preferred"} stories while allowing ${settings.novelty}% novelty.`;
+
   return <div className="beyond-page">
-    <PageHeader eyebrow="SIGNATURE DISCOVERY MODE" title="Beyond your taste." copy="Diversity reranking is provided by the trained backend model; other discovery controls remain a local preview." action={<div className="mode-switch"><button className={settings.mode === "taste" ? "active" : ""} onClick={() => update("mode", "taste")}>My Taste</button><button className={settings.mode === "surprise" ? "active" : ""} onClick={() => update("mode", "surprise")}><Icon name="spark" /> Surprise Me</button></div>} />
-    <div className="discovery-summary"><Icon name="orbit" /><div><span>LIVE DISCOVERY SUMMARY</span><p>{summary} The list and genre distribution update from these settings.</p></div><button onClick={() => { props.setDiscovery(defaultDiscovery); props.notify("Discovery controls reset to prototype defaults."); }}>Reset preferences</button></div>
+    <PageHeader eyebrow="SIGNATURE DISCOVERY MODE" title="Beyond your taste." copy="The live catalogue is reranked with MMR across genres and original languages. Collaborative filtering joins in when viewers with overlapping interactions exist." action={<div className="mode-switch"><button className={settings.mode === "taste" ? "active" : ""} onClick={() => update("mode", "taste")}>My Taste</button><button className={settings.mode === "surprise" ? "active" : ""} onClick={() => update("mode", "surprise")}><Icon name="spark" /> Surprise Me</button></div>} />
+    <div className="discovery-summary"><Icon name="orbit" /><div><span>LIVE DISCOVERY SUMMARY</span><p>{summary} {selected.length ? `${languages.length} languages and ${topGenres.length} genres appear in the current edit.` : "Waiting for catalogue results."}</p></div><button onClick={() => { props.setDiscovery(defaultDiscovery); props.notify("Discovery controls reset."); }}>Reset preferences</button></div>
     <div className="beyond-hero">
       <div className="controls-panel"><div className="panel-intro"><span>DISCOVERY COMPASS</span><h2>How far should we wander?</h2><p>Fine-tune the balance between the familiar and the unexpected.</p></div>
         {[["Familiarity", "familiarity", "Less familiar", "Highly familiar"], ["Genre diversity", "diversity", "Focused", "Wide-ranging"], ["Novelty", "novelty", "Comfort", "Discovery"], ["Popularity", "popularity", "Hidden", "Mainstream"]].map(([label, key, left, right]) => <label className="range-control" key={key}><span><strong>{label}</strong><em>{settings[key as keyof DiscoverySettings] as number}%</em></span><input type="range" min="0" max="100" value={settings[key as keyof DiscoverySettings] as number} onChange={(e) => update(key as keyof DiscoverySettings, +e.target.value)} /><small><i>{left}</i><i>{right}</i></small></label>)}
       </div>
       <div className="diversity-viz"><div className="viz-head"><div><span className="eyebrow">LIVE GENRE DISTRIBUTION</span><h2>{topGenres.length} genres in the leading edit</h2></div><span className="score-ring">{topGenres.length}<small>Genres</small></span></div>
-        <div className="orbit-map"><span className="orbit orbit-a" /><span className="orbit orbit-b" /><span className="orbit orbit-c" /><span className="planet core">{topGenres[0] || "Drama"}</span><span className="planet p1">{topGenres[1] || "Mystery"}</span><span className="planet p2">{topGenres[2] || "Adventure"}</span><span className="planet p3">{topGenres[3] || "History"}</span><span className="planet p4">{topGenres[4] || "Comedy"}</span><span className="planet p5">{selected[0]?.language || "World"}</span></div>
+        <div className="orbit-map"><span className="orbit orbit-a" /><span className="orbit orbit-b" /><span className="orbit orbit-c" /><span className="planet core">{topGenres[0] || "Drama"}</span><span className="planet p1">{topGenres[1] || "Mystery"}</span><span className="planet p2">{topGenres[2] || "Adventure"}</span><span className="planet p3">{topGenres[3] || "History"}</span><span className="planet p4">{topGenres[4] || "Comedy"}</span><span className="planet p5">{languages[0] || "World"}</span></div>
         <div className="viz-legend"><span><i className="dot current" />Your comfort zone</span><span><i className="dot new" />New territory</span></div>
       </div>
     </div>
-    <Section kicker="BACKEND RECOMMENDATIONS" title="From trained model (MovieLens user 1)">{backendLoading ? <div className="loading-grid" aria-label="Loading recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : backendError ? <EmptyState icon="info" title="Recommendations unavailable" copy={backendError} button="Retry" onAction={() => window.location.reload()} /> : backendMovies.length ? <MovieGrid items={backendMovies} onOpen={props.open} saved={props.saved} onSave={props.save} hideMatch /> : <EmptyState icon="search" title="No recommendations returned" copy="The backend returned no recommendations." button="Retry" onAction={() => window.location.reload()} />}</Section>
-    <Section kicker="DIVERSE RECOMMENDATIONS" title="MMR reranking from trained model">{diverseLoading ? <div className="loading-grid" aria-label="Loading diverse recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : diverseError ? <EmptyState icon="info" title="Diverse recommendations unavailable" copy={diverseError} button="Retry" onAction={() => setDiverseRetry((value) => value + 1)} /> : diverseItems.length ? <div className="beyond-grid">{diverseItems.map((item) => <div className="beyond-card" key={item.movie.id}><MovieCard movie={item.movie} onOpen={props.open} saved={props.saved.has(item.movie.id)} onSave={props.save} favourite={props.favourites.has(item.movie.id)} onFavourite={props.favourite} hideMatch /><div className="different"><span>WHY THIS RANKED HERE</span><p>{item.explanation}</p></div></div>)}</div> : <EmptyState icon="search" title="No diverse recommendations returned" copy="The backend returned no diverse recommendations." button="Retry" onAction={() => setDiverseRetry((value) => value + 1)} />}</Section>
-    <p className="filter-note">Genre diversity drives backend MMR reranking; other discovery controls remain a local preview.</p>
+    <Section kicker="LIVE CATALOGUE · HYBRID MMR" title="Diverse recommendations">{loading ? <div className="loading-grid" aria-label="Loading diverse recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : error ? <EmptyState icon="info" title="Diverse recommendations unavailable" copy={error} button="Retry" onAction={() => setRetry((value) => value + 1)} /> : items.length ? <div className="beyond-grid">{items.map((item) => <div className="beyond-card" key={item.movie.id}><MovieCard movie={item.movie} onOpen={props.open} saved={props.saved.has(item.movie.id)} onSave={props.save} favourite={props.favourites.has(item.movie.id)} onFavourite={props.favourite} hideMatch /><div className="different"><span>WHY THIS RANKED HERE</span><p>{item.explanation}</p></div></div>)}</div> : <EmptyState icon="search" title="No diverse recommendations returned" copy="Add languages or genres to your profile to guide the engine." button="Retry" onAction={() => setRetry((value) => value + 1)} />}</Section>
+    <Section kicker="TRAINED MODEL · MMR" title="Diverse MovieLens recommendations">{mlLoading ? <div className="loading-grid" aria-label="Loading model diverse recommendations">{[1, 2, 3].map((n) => <i key={n} />)}</div> : mlError ? <EmptyState icon="info" title="Model recommendations unavailable" copy={mlError} button="Retry" onAction={() => setRetry((value) => value + 1)} /> : mlItems.length ? <div className="beyond-grid">{mlItems.map((item) => <div className="beyond-card" key={item.movie.id}><MovieCard movie={item.movie} onOpen={props.open} saved={props.saved.has(item.movie.id)} onSave={props.save} favourite={props.favourites.has(item.movie.id)} onFavourite={props.favourite} hideMatch /><div className="different"><span>WHY THIS RANKED HERE</span><p>{item.explanation}</p></div></div>)}</div> : <EmptyState icon="search" title="No model recommendations" copy="The trained model returned no diverse recommendations." button="Retry" onAction={() => setRetry((value) => value + 1)} />}</Section>
+    <p className="filter-note">Diversity reranking is applied to the live TMDB catalogue; the trained MovieLens MMR list is shown separately.</p>
   </div>;
 }
 
 function Mood(props: PageProps) {
-  const moods = ["Feel-good", "Suspenseful", "Thought-provoking", "Relaxing", "Adventurous", "Emotional"];
+  const moods = Object.keys(MOODS);
   const [mood, setMood] = useState("Thought-provoking");
   const [filters, setFilters] = useState(defaultFilters);
-  const results = applyMovieFilters(movies.filter((movie) => movie.moods.includes(mood)), filters);
+  const [items, setItems] = useState<Movie[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const genreNames = MOODS[mood].genres;
+    const requests = genreNames.map((genre) => api.catalogueDiscover({ genre, page: 1, vote_count_gte: 40, language: filters.language === "All" ? undefined : filters.language }));
+    Promise.all(requests).then((pages) => {
+      if (cancelled) return;
+      const combined = uniqueCatalogueResults(pages).map(catalogueToMovie);
+      setItems(dedupeMovies(combined));
+    }).catch((caught) => {
+      if (!cancelled) setError(caught instanceof Error ? caught.message : "Mood catalogue unavailable");
+    }).finally(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [mood, filters.language, retry]);
+
+  const results = applyMovieFilters(items, filters);
+
   return <>
-    <PageHeader eyebrow="CURATED CONTEXT · DEMONSTRATION TAGS" title="What kind of evening is this?" copy="Choose a curated mood tag and context. This prototype does not infer emotions or use an emotion model. Backend movie metadata is available, but no mood model is implemented." />
-    <div className="mood-grid">{moods.map((m, i) => <button onClick={() => setMood(m)} className={mood === m ? "active" : ""} key={m}><span className="mood-symbol">{["☼", "◒", "◇", "∿", "↗", "○"][i]}</span><strong>{m}</strong><small>{["Warm, hopeful stories", "Tension that builds", "Ideas that linger", "Gentle, easy pacing", "A sense of wonder", "Stories that move you"][i]}</small></button>)}</div>
-    <div className="toolbar mood-toolbar"><Filters value={filters} onChange={setFilters} /><span className="result-count">{results.length} curated result{results.length === 1 ? "" : "s"}</span></div>
-    <Section kicker={`CURATED FOR · ${mood.toUpperCase()}`} title={`${mood} films for right now`}>{results.length ? <MovieGrid items={results} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} showReason ranked hideMatch /> : <EmptyState icon="mood" title="No films fit every choice" copy="Broaden a context filter to reveal more curated results." button="Reset filters" onAction={() => setFilters(defaultFilters)} />}</Section>
+    <PageHeader eyebrow="MOOD → GENRE MAPPING · LIVE CATALOGUE" title="What kind of evening is this?" copy="Each mood maps to real TMDB genres, then combines with your language and release-period filters. No fabricated mood tags are used." />
+    <div className="mood-grid">{moods.map((entry) => <button onClick={() => setMood(entry)} className={mood === entry ? "active" : ""} key={entry}><span className="mood-symbol">{MOODS[entry].symbol}</span><strong>{entry}</strong><small>{MOODS[entry].copy}</small></button>)}</div>
+    <div className="toolbar mood-toolbar"><Filters value={filters} onChange={setFilters} genres={props.genres} languages={props.languages} /><span className="result-count">{loading ? "Loading…" : `${results.length} catalogue result${results.length === 1 ? "" : "s"}`}</span></div>
+    <Section kicker={`LIVE CATALOGUE · ${mood.toUpperCase()}`} title={`${mood} films for right now`}>{loading ? <div className="loading-grid" aria-label="Loading mood results">{[1, 2, 3].map((n) => <i key={n} />)}</div> : error ? <EmptyState icon="info" title="Mood catalogue unavailable" copy={error} button="Retry" onAction={() => setRetry((value) => value + 1)} /> : results.length ? <MovieGrid items={results} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} showReason ranked hideMatch explanation={(movie) => `${MOODS[mood].genres.slice(0, 2).join(" and ")} match the ${mood.toLowerCase()} mood, filtered from live TMDB metadata.`} /> : <EmptyState icon="mood" title="No films fit every choice" copy="Broaden a context filter to reveal more catalogue results." button="Reset filters" onAction={() => setFilters(defaultFilters)} />}</Section>
   </>;
 }
 
@@ -347,26 +510,25 @@ function Collection(props: PageProps) {
   const [filters, setFilters] = useState(defaultFilters);
   const [query, setQuery] = useState("");
   const tabs = ["Watchlist", "Favourites", "Rated movies", "Preferred genres"];
-  const source = tab === "Watchlist" ? movies.filter((m) => props.saved.has(m.id)) : tab === "Favourites" ? movies.filter((m) => props.favourites.has(m.id)) : movies.filter((m) => props.ratings[m.id]);
+  const source = tab === "Watchlist" ? getRegisteredMovies([...props.saved]) : tab === "Favourites" ? getRegisteredMovies([...props.favourites]) : getRegisteredMovies(Object.keys(props.ratings).map(Number));
   const items = applyMovieFilters(source, filters).filter((movie) => movie.title.toLowerCase().includes(query.toLowerCase()));
   const average = Object.values(props.ratings).length ? (Object.values(props.ratings).reduce((sum, value) => sum + value, 0) / Object.values(props.ratings).length).toFixed(1) : "—";
   return <>
-    <PageHeader eyebrow="YOUR LOCAL PROTOTYPE LIBRARY" title="My collection" copy="The films you saved, loved, and rated on this device. Nothing is stored in a remote account." action={<div className="collection-stats"><span><strong>{props.saved.size}</strong>Saved</span><span><strong>{Object.keys(props.ratings).length}</strong>Rated</span><span><strong>{average}</strong>Avg. rating</span></div>} />
-    <div className="tabs">{tabs.map((t) => <button className={tab === t ? "active" : ""} key={t} onClick={() => setTab(t)}>{t}</button>)}</div>
-    {tab === "Preferred genres" ? <TasteProfile profile={props.profile} setProfile={props.setProfile} /> : <>
-      <div className="toolbar"><Filters value={filters} onChange={setFilters} /><label className="mini-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search collection" /></label></div>
-      {items.length ? <MovieGrid items={items} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /> : <EmptyState icon={tab === "Favourites" ? "heart" : tab === "Rated movies" ? "star" : "bookmark"} title={`No ${tab.toLowerCase()} yet`} copy="Use movie cards or details to build this local prototype collection." button="Explore films" onAction={() => props.navigate("Discover")} />}
+    <PageHeader eyebrow="YOUR CATALOGUE LIBRARY" title="My collection" copy="Films you saved, loved, and rated. Interactions sync to your account so collaborative filtering can use them." action={<div className="collection-stats"><span><strong>{props.saved.size}</strong>Saved</span><span><strong>{Object.keys(props.ratings).length}</strong>Rated</span><span><strong>{average}</strong>Avg. rating</span></div>} />
+    <div className="tabs">{tabs.map((entry) => <button className={tab === entry ? "active" : ""} key={entry} onClick={() => setTab(entry)}>{entry}</button>)}</div>
+    {tab === "Preferred genres" ? <TasteProfile profile={props.profile} setProfile={props.setProfile} genres={props.genres} /> : <>
+      <div className="toolbar"><Filters value={filters} onChange={setFilters} genres={props.genres} languages={props.languages} /><label className="mini-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search collection" /></label></div>
+      {items.length ? <MovieGrid items={items} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} /> : <EmptyState icon={tab === "Favourites" ? "heart" : tab === "Rated movies" ? "star" : "bookmark"} title={`No ${tab.toLowerCase()} yet`} copy="Use catalogue cards or movie details to build this account-backed collection." button="Explore the catalogue" onAction={() => props.openCatalogue(null)} />}
     </>}
   </>;
 }
 
-function TasteProfile({ profile, setProfile }: { profile: TasteProfile; setProfile: React.Dispatch<React.SetStateAction<TasteProfile>> }) {
-  return <div className="taste-profile"><div className="profile-panel"><span className="eyebrow">YOUR TASTE, IN FOCUS</span><h2>{profile.genres.length ? profile.genres.slice(0, 2).join(" meets ") : "Your profile is open."}</h2><p>Preferred genres are used by the local demonstration ranker. Update them here or restart onboarding.</p><div className="taste-tags">{profile.genres.map((genre) => <span key={genre}>{genre}</span>)}</div></div><div className="profile-bars"><h3>Preferred genres</h3><div className="preferred-choices">{allGenres.map((genre) => <button key={genre} className={profile.genres.includes(genre) ? "active" : ""} onClick={() => setProfile((current) => { const genres = Array.isArray(current?.genres) ? current.genres : []; return { ...defaultProfile, ...(current || {}), genres: genres.includes(genre) ? genres.filter((item) => item !== genre) : [...genres, genre] }; })}>{genre}{profile.genres.includes(genre) && <Icon name="check" size={14} />}</button>)}</div></div></div>;
+function TasteProfile({ profile, setProfile, genres }: { profile: TasteProfile; setProfile: React.Dispatch<React.SetStateAction<TasteProfile>>; genres: string[] }) {
+  return <div className="taste-profile"><div className="profile-panel"><span className="eyebrow">YOUR TASTE, IN FOCUS</span><h2>{profile.genres.length ? profile.genres.slice(0, 2).join(" meets ") : "Your profile is open."}</h2><p>Preferred genres and languages drive the hybrid catalogue ranker. Update them here or restart onboarding.</p><div className="taste-tags">{profile.genres.map((genre) => <span key={genre}>{genre}</span>)}{profile.languages.map((code) => <span key={code}>{CSV_LANGUAGES[code] || code}</span>)}</div></div><div className="profile-bars"><h3>Preferred genres</h3><div className="preferred-choices">{genres.map((genre) => <button key={genre} className={profile.genres.includes(genre) ? "active" : ""} onClick={() => setProfile((current) => { const currentGenres = Array.isArray(current?.genres) ? current.genres : []; return { ...defaultProfile, ...(current || {}), genres: currentGenres.includes(genre) ? currentGenres.filter((item) => item !== genre) : [...currentGenres, genre] }; })}>{genre}{profile.genres.includes(genre) && <Icon name="check" size={14} />}</button>)}</div></div></div>;
 }
 
 function Insights() {
   const [empty, setEmpty] = useState(true);
-  const [preview, setPreview] = useState(false);
   const [selectedModel, setSelectedModel] = useState("Hybrid Recommendation");
   const [metrics, setMetrics] = useState<MetricsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -393,17 +555,15 @@ function Insights() {
     "SVD Collaborative Filtering": "collaborative_filtering",
     "Hybrid Recommendation": "hybrid",
   };
-  const rows = metrics?.model_list ?? (metrics?.models
-    ? Object.entries(metrics.models).map(([key, value]) => ({ model: key, ...value }))
-    : []);
+  const rows = metrics?.model_list ?? (metrics?.models ? Object.entries(metrics.models).map(([key, value]) => ({ model: key, ...value })) : []);
   const selectedMetrics = metrics?.models?.[modelKeyByTab[selectedModel]];
   const connected = !!metrics && rows.length > 0;
 
   const modelInformation: Record<string, { status: string; summary: string; inputs: string }> = {
     "Popularity Baseline": { status: connected ? "Evaluation available" : "Design specification only", summary: "Ranks items from aggregate popularity signals without personalizing to an individual user.", inputs: "Requires item interaction counts or aggregate ratings." },
-    "Content-Based Filtering": { status: connected ? "Evaluation available" : "Design specification only", summary: "Would compare movie metadata with a user preference profile built from genres and descriptions.", inputs: "Requires normalized movie features and user preference vectors." },
-    "SVD Collaborative Filtering": { status: connected ? "Evaluation available" : "Awaiting trained model", summary: "Would learn latent user and item factors from a real user–movie rating matrix.", inputs: "Requires MovieLens-style user IDs, movie IDs, ratings, and a trained artifact." },
-    "Hybrid Recommendation": { status: connected ? "Evaluation available" : "Awaiting experiment pipeline", summary: "Would combine collaborative and content signals, then optionally apply a diversity-aware reranker.", inputs: "Requires outputs from both component models and evaluation configuration." },
+    "Content-Based Filtering": { status: connected ? "Evaluation available" : "Design specification only", summary: "Compares movie metadata with a user preference profile built from genres and descriptions.", inputs: "Requires normalized movie features and user preference vectors." },
+    "SVD Collaborative Filtering": { status: connected ? "Evaluation available" : "Awaiting trained model", summary: "Learns latent user and item factors from a real user–movie rating matrix.", inputs: "Requires MovieLens-style user IDs, movie IDs, ratings, and a trained artifact." },
+    "Hybrid Recommendation": { status: connected ? "Evaluation available" : "Awaiting experiment pipeline", summary: "Combines collaborative, content, and catalogue signals, then applies a diversity-aware reranker.", inputs: "Requires outputs from both component models and evaluation configuration." },
   };
   const model = modelInformation[selectedModel];
   const metricDefinitions = [
@@ -415,13 +575,13 @@ function Insights() {
     ["Novelty", "Higher is less familiar", "How much the list surfaces less-popular items."],
   ];
   return <>
-    <PageHeader eyebrow="RECOMMENDER LAB" title="ML Insights" copy={connected ? "Measured evaluation metrics from the trained backend models." : "A transparent view of how recommendation approaches will be evaluated. The backend does not expose evaluation metrics; only model-loading status is available."} action={loading ? <span className="sample-pill">LOADING METRICS</span> : error ? <span className="sample-pill">METRICS UNAVAILABLE</span> : connected ? <span className="sample-pill">MEASURED · BACKEND CONNECTED</span> : <span className="sample-pill">PROTOTYPE · NO MODEL CONNECTED</span>} />
-    <div className="model-tabs">{Object.keys(modelInformation).map((m, i) => <button key={m} className={selectedModel === m ? "active" : ""} onClick={() => setSelectedModel(m)} aria-pressed={selectedModel === m}><span>0{i + 1}</span>{m}</button>)}</div>
+    <PageHeader eyebrow="RECOMMENDER LAB" title="ML Insights" copy={connected ? "Measured evaluation metrics from the trained backend models." : "A transparent view of how recommendation approaches are evaluated."} action={loading ? <span className="sample-pill">LOADING METRICS</span> : error ? <span className="sample-pill">METRICS UNAVAILABLE</span> : connected ? <span className="sample-pill">MEASURED · BACKEND CONNECTED</span> : <span className="sample-pill">PROTOTYPE · NO MODEL CONNECTED</span>} />
+    <div className="model-tabs">{Object.keys(modelInformation).map((entry, index) => <button key={entry} className={selectedModel === entry ? "active" : ""} onClick={() => setSelectedModel(entry)} aria-pressed={selectedModel === entry}><span>0{index + 1}</span>{entry}</button>)}</div>
     <div className="model-information" aria-live="polite"><div><span>SELECTED APPROACH</span><h2>{selectedModel}</h2></div><p>{model.summary}</p><dl><div><dt>Status</dt><dd>{model.status}</dd></div><div><dt>Data needed</dt><dd>{model.inputs}</dd></div></dl></div>
     {loading ? <div className="insights-empty"><div className="empty-visual"><span className="axis axis-x" /><span className="axis axis-y" /><i className="ghost-bar b1" /><i className="ghost-bar b2" /><i className="ghost-bar b3" /><i className="ghost-line" /></div><div><span className="eyebrow">LOADING EVALUATION METRICS</span><h2>Fetching measured results.</h2><p>The ML Insights page is requesting evaluation metrics from the backend.</p></div></div> :
       error ? <EmptyState icon="info" title="Metrics unavailable" copy={error} button="Retry" onAction={() => setReloadToken((value) => value + 1)} /> :
       !connected ? (empty ? <div className="insights-empty"><div className="empty-visual"><span className="axis axis-x" /><span className="axis axis-y" /><i className="ghost-bar b1" /><i className="ghost-bar b2" /><i className="ghost-bar b3" /><i className="ghost-line" /></div><div><span className="eyebrow">AWAITING EXPERIMENT RESULTS</span><h2>Real metrics belong here.</h2><p>Once evaluation data is connected, this space will compare model accuracy, relevance, diversity, and novelty—without fabricated values.</p><Button onClick={() => setEmpty(false)} variant="secondary">Preview dashboard structure</Button></div></div> :
-        <div className="metrics-preview"><div className="preview-note"><Icon name="info" /><span><strong>Illustrative structure only</strong> Values, bars, and outcomes are intentionally omitted until measured experiment output is connected.</span><button onClick={() => setEmpty(true)}>Return to empty state</button></div><div className="metric-grid">{metricDefinitions.map(([metric, direction]) => <div className="metric" key={metric}><span>{metric}</span><strong>—</strong><small>{direction} · no result</small></div>)}</div><div className="chart-grid">{["Standard hybrid vs. diversity-aware", "Relevance vs. diversity trade-off", "New-user cold start", "Recommended genre distribution", "Popular vs. less-popular", "Discovery preference effect"].map((c) => <div className="chart-placeholder" key={c}><div><span>{c}</span><small>Experiment data required</small></div><div className="chart-lines"><i /><i /><i /></div></div>)}</div></div>) :
+        <div className="metrics-preview"><div className="preview-note"><Icon name="info" /><span><strong>Illustrative structure only</strong> Values, bars, and outcomes are intentionally omitted until measured experiment output is connected.</span><button onClick={() => setEmpty(true)}>Return to empty state</button></div><div className="metric-grid">{metricDefinitions.map(([metric, direction]) => <div className="metric" key={metric}><span>{metric}</span><strong>—</strong><small>{direction} · no result</small></div>)}</div></div>) :
       <div className="metrics-preview">
         <div className="preview-note"><Icon name="info" /><span><strong>Measured results</strong> RMSE, Precision@10, and Recall@10 from the trained backend models. Relevance threshold: {metrics?.relevance_threshold ?? "—"}; top K: {metrics?.top_k ?? "—"}.</span></div>
         <div className="metric-grid">
@@ -432,7 +592,6 @@ function Insights() {
       </div>}
     <Section kicker="MODEL COMPARISON" title="Measured evaluation results by model"><div className="measure-grid">{rows.map((row, index) => <article key={row.model}><span>{String(index + 1).padStart(2, "0")}</span><h3>{row.model}</h3><strong>RMSE {row.rmse.toFixed(4)}</strong><p>Precision@10 {row.precision_at_10.toFixed(4)} · Recall@10 {row.recall_at_10.toFixed(4)}</p></article>)}</div></Section>
     <Section kicker="EVALUATION DICTIONARY" title="How each metric should be read"><div className="metric-dictionary">{metricDefinitions.map(([metric, direction, description]) => <article key={metric}><div><h3>{metric}</h3><span>{direction}</span></div><p>{description}</p></article>)}</div></Section>
-    <Section kicker="BACKEND-READY STRUCTURE" title="Experiment payloads to connect"><div className="measure-grid">{[["Accuracy", "RMSE & MAE", "Rating-prediction output by model and dataset split."], ["Ranking", "Precision@K & Recall@K", "Top-K relevance at consistent evaluation cutoffs."], ["Discovery", "Diversity & novelty", "Catalog coverage, popularity, and genre distribution outputs."]].map(([a, b, c], i) => <article key={a}><span>0{i + 1}</span><h3>{a}</h3><strong>{b}</strong><p>{c}</p></article>)}</div></Section>
   </>;
 }
 
@@ -440,121 +599,241 @@ function EmptyState({ icon, title, copy, button, onAction }: { icon: string; tit
   return <div className="empty-state"><Icon name={icon} size={28} /><h2>{title}</h2><p>{copy}</p><Button variant="secondary" onClick={onAction}>{button}</Button></div>;
 }
 
-function CataloguePage() {
-  const [query, setQuery] = useState("");
+function CataloguePage(props: PageProps & { seed: CatalogueSeed; clearSeed: () => void }) {
+  const [query, setQuery] = useState(props.seed?.query ?? "");
+  const [language, setLanguage] = useState(props.seed?.language ?? "");
+  const [genre, setGenre] = useState(props.seed?.genre ?? "");
+  const [year, setYear] = useState("");
+  const [sort, setSort] = useState("popularity.desc");
   const [page, setPage] = useState(1);
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
+  const [data, setData] = useState<CatalogueResponse | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const search = () => {
-    setLoading(true); setError(null);
-    const promise = query.trim() ? api.catalogueSearch({ q: query.trim(), page }) : api.cataloguePopular({ page });
-    promise.then((d) => setData(d)).catch((e) => setError(e instanceof Error ? e.message : "Failed")).finally(() => setLoading(false));
-  };
-  useEffect(() => { search(); }, [page]);
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    if (!props.seed) return;
+    setQuery(props.seed.query ?? "");
+    setLanguage(props.seed.language ?? "");
+    setGenre(props.seed.genre ?? "");
+    setPage(1);
+    props.clearSeed();
+  }, [props.seed]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const timer = window.setTimeout(() => {
+      const genreId = genre ? Object.entries(props.genreMap).find(([, name]) => name === genre)?.[0] : undefined;
+      const parsedYear = year ? Number(year) : undefined;
+      const request = query.trim()
+        ? api.catalogueSearch({ q: query.trim(), language: language || undefined, genre: genreId, year: Number.isFinite(parsedYear) ? parsedYear : undefined, page })
+        : api.catalogueDiscover({ language: language || undefined, genre: genreId, year: Number.isFinite(parsedYear) ? parsedYear : undefined, page, sort_by: sort });
+      request.then((response) => {
+        if (!cancelled) setData(response);
+      }).catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "Catalogue unavailable");
+      }).finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query, language, genre, year, sort, page, retry, props.genreMap]);
+
+  const movies = useMemo(() => data?.results.map(catalogueToMovie) ?? [], [data]);
+  const totalPages = Math.max(1, Math.min(data?.total_pages ?? 1, 500));
+
   return <>
-    <PageHeader eyebrow="REAL CATALOGUE" title="Movie catalogue" copy="Search and browse movies from the connected backend (TMDB). Results depend on backend credentials." />
-    <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-      <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search movies" style={{ flex: 1, padding: 8 }} onKeyDown={(e) => { if (e.key === "Enter") { setPage(1); search(); } }} />
-      <Button onClick={() => { setPage(1); search(); }}>Search</Button>
+    <PageHeader eyebrow="LIVE MULTILINGUAL CATALOGUE" title="Movie catalogue" copy="Search and browse the full TMDB catalogue across Malayalam, Tamil, Hindi, Telugu, Kannada, Korean, Japanese, English, and more. Results are cached on the backend." action={<Button variant="secondary" icon="globe" onClick={() => { setLanguage("ml"); setPage(1); }}>Malayalam cinema</Button>} />
+    <div className="catalogue-filters">
+      <label className="catalogue-search"><Icon name="search" /><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} placeholder="Search titles across every language" onKeyDown={(event) => { if (event.key === "Enter") setPage(1); }} /></label>
+      <select value={language} onChange={(event) => { setLanguage(event.target.value); setPage(1); }} aria-label="Filter by language"><option value="">All languages</option>{Object.entries(props.languages).map(([code, label]) => <option key={code} value={code}>{label}</option>)}</select>
+      <select value={genre} onChange={(event) => { setGenre(event.target.value); setPage(1); }} aria-label="Filter by genre"><option value="">All genres</option>{props.genres.map((name) => <option key={name} value={name}>{name}</option>)}</select>
+      <input className="catalogue-year" value={year} onChange={(event) => { setYear(event.target.value.replace(/\D/g, "").slice(0, 4)); setPage(1); }} placeholder="Year" inputMode="numeric" aria-label="Release year" />
+      <select value={sort} onChange={(event) => { setSort(event.target.value); setPage(1); }} aria-label="Sort results"><option value="popularity.desc">Popularity</option><option value="vote_average.desc">Rating</option><option value="release_date.desc">Newest</option></select>
     </div>
-    {loading && <div className="loading-grid" aria-label="Loading"><i /><i /><i /></div>}
-    {error && <EmptyState icon="info" title="Catalogue unavailable" copy={error} button="Retry" onAction={search} />}
-    {!loading && !error && data && (data.results?.length ? (
-      <>
-        <div className="movie-grid">{data.results.map((m: any) => (
-          <article key={m.external_id} className="movie-card">
-            {m.poster_url ? <img src={m.poster_url} alt={m.title} style={{ width: "100%" }} /> : <div style={{ height: 200, background: "#222" }} />}
-            <h3>{m.title}</h3>
-            <p>{m.original_language} · {m.release_date}</p>
-            <small>{(m.genres || []).join(", ")}</small>
-          </article>
-        ))}</div>
-        <div style={{ marginTop: 16, display: "flex", gap: 8, justifyContent: "center" }}>
-          <Button variant="secondary" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Prev</Button>
-          <span>Page {data.page} / {data.total_pages}</span>
-          <Button variant="secondary" disabled={page >= data.total_pages} onClick={() => setPage((p) => p + 1)}>Next</Button>
-        </div>
-        <p style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>Data provided by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
-      </>
-    ) : <EmptyState icon="search" title="No movies found" copy="Try a different search or check backend credentials." button="Retry" onAction={search} />)}
+    {loading ? <div className="loading-grid" aria-label="Loading catalogue">{[1, 2, 3].map((n) => <i key={n} />)}</div> : error ? <EmptyState icon="info" title="Catalogue unavailable" copy={error} button="Retry" onAction={() => setRetry((value) => value + 1)} /> : movies.length ? <>
+      <div className="catalogue-status"><span>{data?.total_results?.toLocaleString() ?? 0} results · page {data?.page ?? page} of {totalPages}</span>{data?.filtered ? <small>Language, genre, and year filters are applied to this page.</small> : null}</div>
+      <MovieGrid className="catalogue-grid" items={movies} onOpen={props.open} saved={props.saved} onSave={props.save} favourites={props.favourites} onFavourite={props.favourite} />
+      <div className="catalogue-pagination"><Button variant="secondary" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button><span>Page {page} / {totalPages}</span><Button variant="secondary" disabled={page >= totalPages} onClick={() => setPage((value) => value + 1)}>Next</Button></div>
+      <p className="catalogue-attribution">Data provided by TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</p>
+    </> : <EmptyState icon="search" title="No movies found" copy="Try a different title, language, genre, or year. If the catalogue is not configured, add a TMDB key to backend/.env." button="Retry" onAction={() => setRetry((value) => value + 1)} />}
   </>;
 }
 
 function SearchOverlay({ close, openMovie }: { close: () => void; openMovie: (movie: Movie) => void }) {
   const [query, setQuery] = useState("");
+  const [results, setResults] = useState<Movie[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const results = demoCatalogue.search(query);
   useEffect(() => {
     inputRef.current?.focus();
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
+    const handler = (event: KeyboardEvent) => { if (event.key === "Escape") close(); };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [close]);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    const timer = window.setTimeout(() => {
+      const request = query.trim() ? api.catalogueSearch({ q: query.trim(), page: 1 }) : api.catalogueTrending({ time_window: "week", page: 1 });
+      request.then((data) => {
+        if (!cancelled) setResults(data.results.slice(0, 12).map(catalogueToMovie));
+      }).catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : "Search unavailable");
+      }).finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query]);
   return <div className="search-overlay" role="dialog" aria-modal="true" aria-label="Search movie catalogue" onMouseDown={close}>
     <div className="search-dialog" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="search-dialog-input"><Icon name="search" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, genres, moods, languages…" aria-label="Search the demonstration movie catalogue" /><button onClick={close} aria-label="Close search"><Icon name="close" /></button></div>
-      <div className="search-dialog-meta"><span>{query ? `${results.length} result${results.length === 1 ? "" : "s"}` : "Browse the demonstration catalogue"}</span><kbd>Esc to close</kbd></div>
-      <div className="search-results">{results.length ? results.map((movie) => <button key={movie.id} onClick={() => { openMovie(movie); close(); }}><img src={movie.image} alt="" /><span><strong>{movie.title}</strong><small>{movie.year} · {movie.language} · {movie.genres.join(", ")}</small></span><Icon name="arrow" /></button>) : <div className="search-no-results"><Icon name="search" /><strong>No matching sample films</strong><span>Try a title, genre, mood, language, or theme.</span></div>}</div>
+      <div className="search-dialog-input"><Icon name="search" /><input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search titles, genres, languages…" aria-label="Search the live movie catalogue" /><button onClick={close} aria-label="Close search"><Icon name="close" /></button></div>
+      <div className="search-dialog-meta"><span>{loading ? "Searching TMDB…" : `${results.length} result${results.length === 1 ? "" : "s"}`}</span><kbd>Esc to close</kbd></div>
+      <div className="search-results">{loading ? <div className="loading-grid" aria-label="Searching catalogue">{[1, 2, 3].map((n) => <i key={n} />)}</div> : error ? <div className="search-no-results"><Icon name="info" /><strong>Search unavailable</strong><span>{error}</span></div> : results.length ? results.map((movie) => <button key={movie.id} onClick={() => { openMovie(movie); close(); }}><Poster movie={movie} /><span><strong>{movie.title}</strong><small>{movie.year > 0 ? `${movie.year} · ` : ""}{movie.language} · {movie.genres.join(", ")}</small></span><Icon name="arrow" /></button>) : <div className="search-no-results"><Icon name="search" /><strong>No matching catalogue films</strong><span>Try a title, genre, or language.</span></div>}</div>
     </div>
   </div>;
 }
 
 function DetailModal({ movie, close, props }: { movie: Movie; close: () => void; props: PageProps }) {
+  const [similar, setSimilar] = useState<Movie[]>([]);
+  const [similarLoading, setSimilarLoading] = useState(false);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => event.key === "Escape" && close();
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [close]);
-  const similar = movies.filter((candidate) => candidate.id !== movie.id && candidate.genres.some((genre) => movie.genres.includes(genre))).slice(0, 3);
-  const explanation = explainRecommendation(movie, recommendationContext(props));
+  useEffect(() => {
+    let cancelled = false;
+    if (!movie.externalId) {
+      setSimilar([]);
+      return;
+    }
+    setSimilarLoading(true);
+    api.catalogueSimilar(movie.externalId, 1).then((data) => {
+      if (!cancelled) setSimilar(data.results.slice(0, 3).map(catalogueToMovie));
+    }).catch(() => { if (!cancelled) setSimilar([]); }).finally(() => { if (!cancelled) setSimilarLoading(false); });
+    return () => { cancelled = true; };
+  }, [movie.externalId]);
+  const explanation = movie.explanation || explainRecommendation(movie, recommendationContext(props));
   return <div className="modal-backdrop" onMouseDown={close}><div className="detail-modal" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={`${movie.title} details`}>
     <button className="modal-close" onClick={close} aria-label="Close details"><Icon name="close" /></button>
-    <div className="detail-art"><img src={movie.image} alt="" /><div /></div>
-    <div className="detail-content"><span className="sample-pill">SAMPLE MOVIE DATA</span><h2>{movie.title}</h2><p className="detail-meta">{movie.year} · {movie.runtime} · {movie.language} · {movie.genres.join(", ")} · Sample catalog rating {movie.score}/10</p><p className="detail-overview">{movie.overview}</p>
+    <div className="detail-art"><Poster movie={movie} /><div /></div>
+    <div className="detail-content"><span className="sample-pill">{movie.source === "tmdb" ? "TMDB CATALOGUE" : "MOVIELENS MODEL"}</span><h2>{movie.title}</h2><p className="detail-meta">{movie.year > 0 ? `${movie.year} · ` : ""}{movie.language} · {movie.genres.join(", ") || "Genre unknown"} · ★ {movie.score}/10{movie.voteCount ? ` · ${movie.voteCount.toLocaleString()} votes` : ""}</p><p className="detail-overview">{movie.overview || "No synopsis is available for this title yet."}</p>
       <div className="detail-actions"><Button icon={props.saved.has(movie.id) ? "check" : "plus"} onClick={() => props.save(movie.id)}>{props.saved.has(movie.id) ? "In watchlist" : "Add to watchlist"}</Button><Button variant="secondary" icon="heart" onClick={() => props.favourite(movie.id)}>{props.favourites.has(movie.id) ? "Favourite" : "Add favourite"}</Button></div>
-      <div className="detail-feedback"><div className="stars"><span>Your local rating</span>{[1, 2, 3, 4, 5].map((n) => <button aria-label={`Rate ${n} stars`} className={(props.ratings[movie.id] || 0) >= n ? "active" : ""} onClick={() => props.rate(movie.id, n)} key={n}><Icon name="star" /></button>)}</div><div className="feedback-pair"><button className={props.feedback[movie.id] === "more" ? "active" : ""} onClick={() => props.setMovieFeedback(movie.id, "more")}>More like this</button><button className={props.feedback[movie.id] === "less" ? "active" : ""} onClick={() => props.setMovieFeedback(movie.id, "less")}>Less like this</button></div></div>
-      <div className="modal-reason"><Icon name="spark" /><div><strong>Why this was recommended</strong><p>{explanation} This explanation reflects the active demonstration ranking signals only.</p></div></div>
-      <h3 className="similar-title">Similar sample films</h3><div className="similar-row">{similar.map((m) => <button key={m.id} onClick={() => props.open(m)}><img src={m.image} alt="" /><span>{m.title}</span></button>)}</div>
+      <div className="detail-feedback"><div className="stars"><span>Your rating</span>{[1, 2, 3, 4, 5].map((n) => <button aria-label={`Rate ${n} stars`} className={(props.ratings[movie.id] || 0) >= n ? "active" : ""} onClick={() => props.rate(movie.id, n)} key={n}><Icon name="star" /></button>)}</div><div className="feedback-pair"><button className={props.feedback[movie.id] === "more" ? "active" : ""} onClick={() => props.setMovieFeedback(movie.id, "more")}>More like this</button><button className={props.feedback[movie.id] === "less" ? "active" : ""} onClick={() => props.setMovieFeedback(movie.id, "less")}>Less like this</button></div></div>
+      <div className="modal-reason"><Icon name="spark" /><div><strong>Why this was recommended</strong><p>{explanation}</p></div></div>
+      <h3 className="similar-title">More like this</h3>{similarLoading ? <div className="loading-inline">Loading similar films…</div> : similar.length ? <div className="similar-row">{similar.map((entry) => <button key={entry.id} onClick={() => props.open(entry)}><Poster movie={entry} /><span>{entry.title}</span></button>)}</div> : <p className="filter-note">No similar TMDB titles were returned.</p>}
     </div>
   </div></div>;
 }
 
-function Onboarding({ close, complete }: { close: () => void; complete: (profile: TasteProfile, ratings: Record<number, number>) => void }) {
+function Onboarding({ close, complete, languages }: { close: () => void; complete: (profile: TasteProfile, ratings: Record<number, number>, favourites: Movie[]) => void; languages: Record<string, string> }) {
   const [step, setStep] = useState(1);
   const [genres, setGenres] = useState<string[]>([]);
-  const [selectedMovies, setSelectedMovies] = useState<number[]>([]);
+  const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
+  const [selectedMovies, setSelectedMovies] = useState<Movie[]>([]);
   const [ratings, setRatings] = useState<Record<number, number>>({});
   const [discovery, setDiscovery] = useState<"familiar" | "new" | null>(null);
   const [query, setQuery] = useState("");
-  const options = ["Drama", "Mystery", "Thriller", "Sci-Fi", "Comedy", "Documentary", "Romance", "Adventure"];
-  const movieOptions = movies.filter((movie) => `${movie.title} ${movie.genres.join(" ")}`.toLowerCase().includes(query.toLowerCase()));
-  const temporaryProfile: TasteProfile = { genres, favouriteMovies: selectedMovies, discovery: discovery || "new" };
-  const onboardingContext: RecommendationContext = { settings: { ...defaultDiscovery, mode: discovery === "familiar" ? "taste" : "surprise" }, profile: temporaryProfile, feedback: {}, ratings, catalogue: demoCatalogue };
-  const initialRecommendations = rerankMoviesForDiversity(movies.filter((movie) => !selectedMovies.includes(movie.id)), onboardingContext, 4).map((item) => item.movie);
-  const canContinue = step === 1 ? genres.length >= 2 : step === 2 ? selectedMovies.length > 0 : step === 4 ? discovery !== null : true;
-  const finish = () => complete({ genres, favouriteMovies: selectedMovies, discovery: discovery || "new" }, ratings);
+  const [options, setOptions] = useState<Movie[]>([]);
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [preview, setPreview] = useState<Movie[]>([]);
+  const genreOptions = CSV_GENRES;
+
+  useEffect(() => {
+    let cancelled = false;
+    setOptionsLoading(true);
+    setOptionsError(null);
+    const timer = window.setTimeout(() => {
+      const trimmed = query.trim();
+      const request = trimmed
+        ? api.catalogueSearch({ q: trimmed, page: 1 })
+        : selectedLanguages.length
+          ? Promise.all(selectedLanguages.slice(0, 3).map((language) => api.cataloguePopular({ language, page: 1 }))).then((pages) => ({ ...pages[0], results: uniqueCatalogueResults(pages).slice(0, 24) }))
+          : api.catalogueTrending({ time_window: "week", page: 1 });
+      request.then((data) => {
+        if (!cancelled) setOptions(dedupeMovies(data.results.map(catalogueToMovie)));
+      }).catch((caught) => {
+        if (!cancelled) setOptionsError(caught instanceof Error ? caught.message : "Catalogue unavailable");
+      }).finally(() => {
+        if (!cancelled) setOptionsLoading(false);
+      });
+    }, 350);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query, selectedLanguages]);
+
+  useEffect(() => {
+    if (step !== 5) return;
+    let cancelled = false;
+    const genreName = genres[0];
+    const genreId = genreName ? Object.entries({ 28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime", 99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History", 27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction", 53: "Thriller", 10752: "War", 37: "Western" }).find(([, name]) => name === genreName)?.[0] : undefined;
+    api.catalogueDiscover({ genre: genreId, language: selectedLanguages[0], sort_by: "vote_average.desc", vote_count_gte: 40, page: 1 }).then((data) => {
+      if (!cancelled) setPreview(data.results.slice(0, 4).map(catalogueToMovie));
+    }).catch(() => {
+      if (!cancelled) setPreview(selectedMovies.slice(0, 4));
+    });
+    return () => { cancelled = true; };
+  }, [step]);
+
+  const temporaryProfile: TasteProfile = { genres, languages: selectedLanguages, favouriteMovies: selectedMovies.map((movie) => movie.id), discovery: discovery || "new" };
+  const onboardingContext: RecommendationContext = { settings: { ...defaultDiscovery, mode: discovery === "familiar" ? "taste" : "surprise" }, profile: temporaryProfile, feedback: {}, ratings, catalogue: registryCatalogue };
+  const initialRecommendations = preview.length ? rerankMoviesForDiversity(preview, onboardingContext, 4).map((item) => item.movie) : selectedMovies.slice(0, 4);
+  const canContinue = step === 1 ? genres.length >= 2 : step === 2 ? selectedMovies.length > 0 || Boolean(optionsError) : step === 4 ? discovery !== null : true;
+  const finish = () => complete({ genres, languages: selectedLanguages, favouriteMovies: selectedMovies.map((movie) => movie.id), discovery: discovery || "new" }, ratings, selectedMovies);
+
   return <div className="modal-backdrop onboarding-bg"><div className="onboarding" role="dialog" aria-modal="true">
     <div className="onboarding-top"><div className="brand-mark">C</div><span>BUILD YOUR TASTE PROFILE</span><button onClick={close}>Skip for now</button></div>
     <div className="progress">{[1, 2, 3, 4, 5].map((n) => <i key={n} className={step >= n ? "active" : ""} />)}</div>
     <div className="onboarding-content">
-      {step === 1 && <><span className="eyebrow">STEP 1 OF 5</span><h2>What worlds pull you in?</h2><p>Choose at least two. You can change these any time.</p><div className="choice-grid">{options.map((g) => <button className={genres.includes(g) ? "active" : ""} onClick={() => setGenres(genres.includes(g) ? genres.filter((x) => x !== g) : [...genres, g])} key={g}>{g}{genres.includes(g) && <Icon name="check" />}</button>)}</div></>}
-      {step === 2 && <><span className="eyebrow">STEP 2 OF 5</span><h2>Pick a few favourites.</h2><p>Search and select at least one sample film closest to your taste.</p><label className="onboarding-search"><Icon name="search" /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search sample movies or genres" /></label><div className="onboarding-posters">{movieOptions.map((m) => <button key={m.id} className={selectedMovies.includes(m.id) ? "active" : ""} onClick={() => setSelectedMovies((current) => current.includes(m.id) ? current.filter((id) => id !== m.id) : [...current, m.id])}><img src={m.image} alt="" /><span>{m.title}</span>{selectedMovies.includes(m.id) && <i><Icon name="check" /></i>}</button>)}</div></>}
-      {step === 3 && <><span className="eyebrow">STEP 3 OF 5 · OPTIONAL</span><h2>Make the signal sharper.</h2><p>Rate your selected sample films. More feedback can improve future recommendations.</p><div className="rating-stack">{movies.filter((movie) => selectedMovies.includes(movie.id)).map((m) => <div key={m.id}><img src={m.image} alt="" /><span>{m.title}<small>{m.year}</small></span><div>{[1, 2, 3, 4, 5].map((n) => <button className={(ratings[m.id] || 0) >= n ? "active" : ""} onClick={() => setRatings({ ...ratings, [m.id]: n })} aria-label={`Rate ${m.title} ${n} stars`} key={n}><Icon name="star" /></button>)}</div></div>)}</div></>}
-      {step === 4 && <><span className="eyebrow">STEP 4 OF 5</span><h2>Comfort, or discovery?</h2><p>Set your starting point. You’ll always be able to adjust it.</p><div className="discovery-choice"><button className={discovery === "familiar" ? "active" : ""} onClick={() => setDiscovery("familiar")}><Icon name="heart" size={28} /><strong>Keep it familiar</strong><span>More films close to what you already love.</span></button><button className={discovery === "new" ? "active" : ""} onClick={() => setDiscovery("new")}><Icon name="orbit" size={28} /><strong>Lead me somewhere new</strong><span>Broader genres, with a thread back to your taste.</span></button></div></>}
-      {step === 5 && <><span className="eyebrow">YOUR FIRST DEMONSTRATION EDIT</span><h2>Your cinema starts here.</h2><p>These initial recommendations use your selected sample genres, films, and ratings. They can improve as you add more local feedback.</p><div className="onboarding-posters result">{initialRecommendations.map((m) => <article key={m.id}><img src={m.image} alt="" /><span>{m.title}</span><small>{m.genres.join(" · ")}</small></article>)}</div></>}
+      {step === 1 && <><span className="eyebrow">STEP 1 OF 5</span><h2>What worlds pull you in?</h2><p>Choose at least two genres. Languages are optional and unlock cross-language recommendations.</p><div className="choice-grid">{genreOptions.map((genre) => <button className={genres.includes(genre) ? "active" : ""} onClick={() => setGenres(genres.includes(genre) ? genres.filter((entry) => entry !== genre) : [...genres, genre])} key={genre}>{genre}{genres.includes(genre) && <Icon name="check" />}</button>)}</div><div className="chip-row">{Object.entries(languages).slice(0, 14).map(([code, label]) => <button key={code} className={`chip ${selectedLanguages.includes(code) ? "active" : ""}`} onClick={() => setSelectedLanguages((current) => current.includes(code) ? current.filter((entry) => entry !== code) : [...current, code])}>{label}{selectedLanguages.includes(code) && <Icon name="check" size={12} />}</button>)}</div></>}
+      {step === 2 && <><span className="eyebrow">STEP 2 OF 5</span><h2>Pick a few favourites.</h2><p>Search the live TMDB catalogue. Your selections become real language and genre signals.</p><label className="onboarding-search"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search any movie or language" /></label>{optionsError ? <p className="filter-note">Catalogue unavailable: {optionsError}. You can continue and configure TMDB later.</p> : null}<div className="onboarding-posters">{optionsLoading ? [1, 2, 3, 4, 5, 6].map((n) => <i className="poster-skeleton" key={n} />) : options.map((movie) => <button key={movie.id} className={selectedMovies.some((entry) => entry.id === movie.id) ? "active" : ""} onClick={() => setSelectedMovies((current) => current.some((entry) => entry.id === movie.id) ? current.filter((entry) => entry.id !== movie.id) : [...current, movie])}><Poster movie={movie} /><span>{movie.title}</span>{selectedMovies.some((entry) => entry.id === movie.id) && <i><Icon name="check" /></i>}</button>)}</div></>}
+      {step === 3 && <><span className="eyebrow">STEP 3 OF 5 · OPTIONAL</span><h2>Make the signal sharper.</h2><p>Rate your selected films. Ratings power collaborative filtering and content signals.</p><div className="rating-stack">{selectedMovies.map((movie) => <div key={movie.id}><Poster movie={movie} /><span>{movie.title}<small>{movie.year > 0 ? movie.year : movie.language}</small></span><div>{[1, 2, 3, 4, 5].map((n) => <button className={(ratings[movie.id] || 0) >= n ? "active" : ""} onClick={() => setRatings({ ...ratings, [movie.id]: n })} aria-label={`Rate ${movie.title} ${n} stars`} key={n}><Icon name="star" /></button>)}</div></div>)}</div></>}
+      {step === 4 && <><span className="eyebrow">STEP 4 OF 5</span><h2>Comfort, or discovery?</h2><p>Set your starting point. You’ll always be able to adjust it.</p><div className="discovery-choice"><button className={discovery === "familiar" ? "active" : ""} onClick={() => setDiscovery("familiar")}><Icon name="heart" size={28} /><strong>Keep it familiar</strong><span>More films close to what you already love.</span></button><button className={discovery === "new" ? "active" : ""} onClick={() => setDiscovery("new")}><Icon name="orbit" size={28} /><strong>Lead me somewhere new</strong><span>Cross-language picks with a thread back to your taste.</span></button></div></>}
+      {step === 5 && <><span className="eyebrow">YOUR FIRST LIVE CATALOGUE EDIT</span><h2>Your cinema starts here.</h2><p>These titles come from the live TMDB catalogue using your genres, languages, and selected films.</p><div className="onboarding-posters result">{initialRecommendations.map((movie) => <article key={movie.id}><Poster movie={movie} /><span>{movie.title}</span><small>{movie.genres.join(" · ")} · {movie.language}</small></article>)}</div></>}
     </div>
-    <div className="onboarding-footer"><span>{step === 1 ? `${genres.length} genres selected` : step === 2 ? `${selectedMovies.length} movies selected` : step === 5 ? "Local taste profile ready" : "Your choices remain editable"}</span><div>{step > 1 && <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button>}<Button disabled={!canContinue} onClick={() => step === 5 ? finish() : setStep(step + 1)}>{step === 5 ? "Enter CineMind" : "Continue"} <Icon name="arrow" /></Button></div></div>
+    <div className="onboarding-footer"><span>{step === 1 ? `${genres.length} genres · ${selectedLanguages.length} languages` : step === 2 ? `${selectedMovies.length} movies selected` : step === 5 ? "Taste profile ready" : "Your choices remain editable"}</span><div>{step > 1 && <Button variant="ghost" onClick={() => setStep(step - 1)}>Back</Button>}<Button disabled={!canContinue} onClick={() => step === 5 ? finish() : setStep(step + 1)}>{step === 5 ? "Enter CineMind" : "Continue"} <Icon name="arrow" /></Button></div></div>
   </div></div>;
+}
+
+function AuthScreen({ onLogin, onRegister, loading, error }: { onLogin: (email: string, password: string) => void; onRegister: (name: string, email: string, password: string) => void; loading: boolean; error: string | null }) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  return <div className="modal-backdrop" style={{ zIndex: 200 }}>
+    <div style={{ maxWidth: 420, width: "100%", background: "var(--surface, #15161a)", border: "1px solid rgba(255,255,255,.12)", borderRadius: 12, padding: 24 }}>
+      <div className="brand-mark" style={{ marginBottom: 12 }}>C</div>
+      <h2 style={{ marginTop: 0 }}>{mode === "login" ? "Sign in" : "Create account"}</h2>
+      <p style={{ color: "var(--muted)", fontSize: 11, lineHeight: 1.6 }}>CineMind stores your preferences, favourites, ratings, and watchlist so the multilingual recommender can personalize across languages.</p>
+      <form onSubmit={(e) => {
+        e.preventDefault();
+        const fd = new FormData(e.currentTarget);
+        const email = String(fd.get("email") || "");
+        const password = String(fd.get("password") || "");
+        if (mode === "login") onLogin(email, password);
+        else onRegister(String(fd.get("name") || ""), email, password);
+      }}>
+        {mode === "register" && <input name="name" placeholder="Name" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />}
+        <input name="email" type="email" placeholder="Email" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
+        <input name="password" type="password" placeholder="Password" required minLength={6} style={{ width: "100%", marginBottom: 8, padding: 8 }} />
+        {error && <p style={{ color: "red" }}>{error}</p>}
+        <Button type="submit" disabled={loading}>{loading ? "..." : mode === "login" ? "Sign in" : "Create account"}</Button>
+      </form>
+      <button onClick={() => setMode(mode === "login" ? "register" : "login")} style={{ marginTop: 8, background: "none", border: "none", color: "inherit", cursor: "pointer" }}>
+        {mode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}
+      </button>
+    </div>
+  </div>;
 }
 
 export default function App() {
   const [page, setPage] = useState<Page>("Discover");
   const [theme, setTheme] = usePersistentState<"dark" | "light">("cinemind-theme", "dark");
   const [selected, setSelected] = useState<Movie | null>(null);
-  const [savedIds, setSavedIds] = usePersistentState<number[]>("cinemind-watchlist", [2, 4, 7, 10]);
+  const [savedIds, setSavedIds] = usePersistentState<number[]>("cinemind-watchlist", []);
   const [favouriteIds, setFavouriteIds] = usePersistentState<number[]>("cinemind-favourites", []);
   const [ratings, setRatings] = usePersistentState<Record<number, number>>("cinemind-ratings", {});
   const [feedback, setFeedback] = usePersistentState<Record<number, Feedback>>("cinemind-feedback", {});
@@ -565,10 +844,17 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [authToken, setAuthToken] = useState<string>(() => sessionStorage.getItem("cinemind-token") || "");
-  const [authUser, setAuthUser] = useState<any>(() => { try { return JSON.parse(sessionStorage.getItem("cinemind-user") || "null"); } catch { return null; } });
-  const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => { try { return JSON.parse(sessionStorage.getItem("cinemind-user") || "null"); } catch { return null; } });
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [catalogueSeed, setCatalogueSeed] = useState<CatalogueSeed>(null);
+  const [languages, setLanguages] = useState<Record<string, string>>(CSV_LANGUAGES);
+  const [genreMap, setGenreMap] = useState<Record<string, string>>({});
+  const genres = useMemo(() => {
+    const names = Object.values(genreMap);
+    return names.length ? [...new Set(names)].sort() : CSV_GENRES;
+  }, [genreMap]);
+
   const safeSavedIds = Array.isArray(savedIds) ? savedIds.filter(Number.isFinite) : [];
   const safeFavouriteIds = Array.isArray(favouriteIds) ? favouriteIds.filter(Number.isFinite) : [];
   const safeRatings = ratings && typeof ratings === "object" && !Array.isArray(ratings) ? ratings : {};
@@ -576,14 +862,23 @@ export default function App() {
   const safeTheme = theme === "light" ? "light" : "dark";
   const saved = useMemo(() => new Set(safeSavedIds), [savedIds]);
   const favourites = useMemo(() => new Set(safeFavouriteIds), [favouriteIds]);
-  const safeProfile: TasteProfile = {
+  const safeProfile = useMemo<TasteProfile>(() => ({
     ...defaultProfile,
     ...(profile || {}),
     genres: Array.isArray(profile?.genres) ? profile.genres : defaultProfile.genres,
+    languages: Array.isArray(profile?.languages) ? profile.languages : defaultProfile.languages,
     favouriteMovies: Array.isArray(profile?.favouriteMovies) ? profile.favouriteMovies : [],
     discovery: profile?.discovery === "familiar" ? "familiar" : "new",
-  };
-  const safeDiscovery: DiscoverySettings = { ...defaultDiscovery, ...(discovery || {}) };
+  }), [profile]);
+  const safeDiscovery = useMemo<DiscoverySettings>(() => ({ ...defaultDiscovery, ...(discovery || {}) }), [discovery]);
+
+  useEffect(() => {
+    api.catalogueConfig().then((config) => {
+      if (config.languages && Object.keys(config.languages).length) setLanguages(config.languages);
+      if (config.genres) setGenreMap(config.genres);
+    }).catch(() => { /* The bundled language/genre metadata remains usable while the backend is offline. */ });
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
@@ -594,24 +889,50 @@ export default function App() {
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
+
   const notify = (message: string) => {
     setToast(message);
     window.setTimeout(() => setToast(""), 2600);
   };
+
   const save = (id: number) => {
+    const movie = getRegisteredMovie(id);
+    const adding = !saved.has(id);
     setSavedIds((current) => { const ids = Array.isArray(current) ? current : []; return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]; });
-    notify(saved.has(id) ? "Removed from your local watchlist." : "Added to your local watchlist.");
+    if (movie?.externalId && authToken) {
+      const item = movieToCatalogueItem(movie);
+      if (item) {
+        const request = adding ? api.addWatchlist(authToken, item) : api.removeWatchlist(authToken, "tmdb", movie.externalId);
+        request.catch(() => notify("Watchlist saved locally; account sync failed."));
+      }
+    }
+    notify(adding ? "Added to your watchlist." : "Removed from your watchlist.");
   };
+
   const favourite = (id: number) => {
+    const movie = getRegisteredMovie(id);
+    const adding = !favourites.has(id);
     setFavouriteIds((current) => { const ids = Array.isArray(current) ? current : []; return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]; });
-    notify(favourites.has(id) ? "Removed from local favourites." : "Added to local favourites.");
+    if (movie?.externalId && authToken) {
+      const item = movieToCatalogueItem(movie);
+      if (item) {
+        const request = adding ? api.addFavourite(authToken, item) : api.removeFavourite(authToken, "tmdb", movie.externalId);
+        request.catch(() => notify("Favourite saved locally; account sync failed."));
+      }
+    }
+    notify(adding ? "Added to your favourites." : "Removed from your favourites.");
   };
+
   const rate = (id: number, rating: number) => {
     setRatings((current) => ({ ...(current && typeof current === "object" ? current : {}), [id]: rating }));
-    const movie = demoCatalogue.getById(id);
+    const movie = getRegisteredMovie(id);
+    if (movie?.externalId && authToken) {
+      api.addRating(authToken, "tmdb", movie.externalId, rating).catch(() => notify("Rating saved locally; account sync failed."));
+    }
     if (movie && rating >= 4) setProfile((current) => ({ ...defaultProfile, ...(current || {}), genres: [...new Set([...(Array.isArray(current?.genres) ? current.genres : []), ...movie.genres])] }));
-    notify(`Saved a ${rating}-star rating locally.`);
+    notify(`Saved a ${rating}-star rating.`);
   };
+
   const setMovieFeedback = (id: number, value: Feedback) => {
     const removing = safeFeedback[id] === value;
     setFeedback((current) => {
@@ -619,101 +940,201 @@ export default function App() {
       if (next[id] === value) delete next[id]; else next[id] = value;
       return next;
     });
-    const movie = demoCatalogue.getById(id);
+    const movie = getRegisteredMovie(id);
     if (movie && !removing) setProfile((current) => {
       const currentGenres = Array.isArray(current?.genres) ? current.genres : [];
       return { ...defaultProfile, ...(current || {}), genres: value === "more" ? [...new Set([...currentGenres, ...movie.genres])] : currentGenres.filter((genre) => !movie.genres.includes(genre) || currentGenres.length <= 1) };
     });
-    notify(removing ? "Movie feedback cleared." : `Local preference updated: ${value === "more" ? "more" : "less"} like this.`);
+    notify(removing ? "Movie feedback cleared." : `Preference updated: ${value === "more" ? "more" : "less"} like this.`);
   };
-  const navigate = (p: Page) => { setPage(p); setMobileMenu(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+
+  const navigate = (nextPage: Page) => { setPage(nextPage); setMobileMenu(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
+  const openCatalogue = (seed: CatalogueSeed) => { setCatalogueSeed(seed); navigate("Catalogue"); };
+
+  const resetAccountState = () => {
+    setSavedIds([]);
+    setFavouriteIds([]);
+    setRatings({});
+    setFeedback({});
+    setProfile(defaultProfile);
+    setDiscovery(defaultDiscovery);
+    setCatalogueSeed(null);
+    setSelected(null);
+    setSearchOpen(false);
+    setOnboarding(false);
+    setPage("Discover");
+  };
+
+  const rememberAccount = (userId: number) => {
+    const marker = "cinemind-account";
+    const previous = localStorage.getItem(marker);
+    if (previous !== String(userId)) resetAccountState();
+    localStorage.setItem(marker, String(userId));
+  };
+
   const handleLogin = async (email: string, password: string) => {
     setAuthLoading(true); setAuthError(null);
     try {
       const res = await api.login(email, password);
+      rememberAccount(res.user.id);
       setAuthToken(res.access_token); setAuthUser(res.user);
       sessionStorage.setItem("cinemind-token", res.access_token);
       sessionStorage.setItem("cinemind-user", JSON.stringify(res.user));
-      setAuthMode(null);
-    } catch (e) { setAuthError(e instanceof Error ? e.message : "Login failed"); }
+      setPage("Discover");
+    } catch (error) { setAuthError(error instanceof Error ? error.message : "Login failed"); }
     finally { setAuthLoading(false); }
   };
+
   const handleRegister = async (name: string, email: string, password: string) => {
     setAuthLoading(true); setAuthError(null);
     try {
       const res = await api.register(name, email, password);
+      rememberAccount(res.user.id);
       setAuthToken(res.access_token); setAuthUser(res.user);
       sessionStorage.setItem("cinemind-token", res.access_token);
       sessionStorage.setItem("cinemind-user", JSON.stringify(res.user));
-      setAuthMode(null);
-    } catch (e) { setAuthError(e instanceof Error ? e.message : "Registration failed"); }
+      setOnboarding(true);
+    } catch (error) { setAuthError(error instanceof Error ? error.message : "Registration failed"); }
     finally { setAuthLoading(false); }
   };
+
   const handleLogout = () => {
+    if (authToken) api.logout().catch(() => {});
+    localStorage.removeItem("cinemind-account");
     setAuthToken(""); setAuthUser(null);
     sessionStorage.removeItem("cinemind-token"); sessionStorage.removeItem("cinemind-user");
+    resetAccountState();
   };
-  const props: PageProps = { open: setSelected, saved, save, favourites, favourite, ratings: safeRatings, rate, feedback: safeFeedback, setMovieFeedback, profile: safeProfile, setProfile, discovery: safeDiscovery, setDiscovery, notify, navigate, openSearch: () => setSearchOpen(true) };
+
+  useEffect(() => {
+    if (!authToken) return;
+    let cancelled = false;
+    api.me(authToken).then((user) => {
+      if (cancelled) return;
+      setAuthUser(user);
+      return Promise.all([
+        api.getPreferences(authToken),
+        api.favourites(authToken),
+        api.watchlist(authToken),
+        api.userRatings(authToken),
+      ]).then(async ([prefs, favouriteItems, watchlistItems, ratingItems]) => {
+        if (cancelled) return;
+        setProfile((current) => {
+          const base = { ...defaultProfile, ...(current || {}) };
+          const hasRemotePreferences = prefs.onboarding_completed || prefs.genres.length > 0 || prefs.languages.length > 0;
+          return hasRemotePreferences ? { ...base, genres: prefs.genres, languages: prefs.languages } : base;
+        });
+        const mappedFavourites = favouriteItems.map((item) => catalogueItemToMovie(item));
+        const mappedWatchlist = watchlistItems.map((item) => catalogueItemToMovie(item));
+        const ratingMap: Record<number, number> = {};
+        await Promise.all(ratingItems.slice(0, 40).map(async (item) => {
+          let movie: Movie;
+          try {
+            movie = catalogueToMovie(await api.catalogueMovie(item.external_id));
+          } catch {
+            movie = catalogueItemToMovie({ source: item.source, external_id: item.external_id, title: item.external_id, genres: [] }, item.rating);
+          }
+          ratingMap[movie.id] = item.rating;
+        }));
+        setFavouriteIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...mappedFavourites.map((movie) => movie.id)])]);
+        setSavedIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...mappedWatchlist.map((movie) => movie.id)])]);
+        setRatings((current) => ({ ...(current && typeof current === "object" ? current : {}), ...ratingMap }));
+        if (!prefs.onboarding_completed) setOnboarding(true);
+      });
+    }).catch((error) => {
+      if (cancelled) return;
+      if (error instanceof ApiError && error.status === 401) handleLogout();
+      else notify("The backend is unreachable; showing locally cached account data.");
+    });
+    return () => { cancelled = true; };
+  }, [authToken]);
+
+  const props: PageProps = {
+    token: authToken,
+    user: authUser,
+    open: setSelected,
+    saved,
+    save,
+    favourites,
+    favourite,
+    ratings: safeRatings,
+    rate,
+    feedback: safeFeedback,
+    setMovieFeedback,
+    profile: safeProfile,
+    setProfile,
+    discovery: safeDiscovery,
+    setDiscovery,
+    notify,
+    navigate,
+    openSearch: () => setSearchOpen(true),
+    openCatalogue,
+    languages,
+    genres,
+    genreMap,
+  };
+
   const content = (() => {
     if (page === "Discover") return <Discover {...props} />;
     if (page === "For You") return <ForYou {...props} />;
     if (page === "Beyond Your Taste") return <Beyond {...props} />;
     if (page === "Mood & Context") return <Mood {...props} />;
     if (page === "My Collection") return <Collection {...props} />;
-    if (page === "Catalogue") return <CataloguePage />;
+    if (page === "Catalogue") return <CataloguePage {...props} seed={catalogueSeed} clearSeed={() => setCatalogueSeed(null)} />;
     return <Insights />;
   })();
-  const profileProgress = Math.min(100, 20 + safeProfile.genres.length * 8 + safeProfile.favouriteMovies.length * 5 + Object.keys(safeRatings).length * 3);
-  const completeOnboarding = (nextProfile: TasteProfile, onboardingRatings: Record<number, number>) => {
+
+  const completeOnboarding = async (nextProfile: TasteProfile, onboardingRatings: Record<number, number>, onboardingFavourites: Movie[]) => {
     setProfile(nextProfile);
     setRatings((current) => ({ ...(current && typeof current === "object" ? current : {}), ...onboardingRatings }));
     setFavouriteIds((current) => [...new Set([...(Array.isArray(current) ? current : []), ...nextProfile.favouriteMovies])]);
     setDiscovery((current) => ({ ...current, mode: nextProfile.discovery === "familiar" ? "taste" : "surprise" }));
+    registerMovies(onboardingFavourites);
+    if (authToken) {
+      try {
+        await api.updatePreferences(authToken, {
+          languages: nextProfile.languages,
+          genres: nextProfile.genres,
+          moods: [],
+          release_period: "",
+          duration: "",
+          onboarding_completed: true,
+        });
+        await Promise.all(onboardingFavourites.map(async (movie) => {
+          const item = movieToCatalogueItem(movie);
+          if (item) await api.addFavourite(authToken, item);
+          const rating = onboardingRatings[movie.id];
+          if (rating && movie.externalId) await api.addRating(authToken, "tmdb", movie.externalId, rating);
+        }));
+      } catch {
+        notify("Your taste profile was saved locally; account sync failed.");
+      }
+    }
     setOnboarding(false);
     setPage("For You");
-    notify("Local taste profile updated. Your demonstration edit is ready.");
+    notify("Taste profile saved. The multilingual engine is ranking your catalogue.");
   };
+
+  if (!authToken || !authUser) {
+    return <AuthScreen onLogin={handleLogin} onRegister={handleRegister} loading={authLoading} error={authError} />;
+  }
+
   return <div className={`app theme-${safeTheme}`}>
     <aside className={`sidebar ${mobileMenu ? "mobile-open" : ""}`}>
       <button className="brand" onClick={() => navigate("Discover")}><span className="brand-mark">C</span><span><strong>CineMind</strong><small>KNOW YOUR TASTE</small></span></button>
       <nav>{nav.map((item) => <button key={item.name} className={page === item.name ? "active" : ""} onClick={() => navigate(item.name)}><Icon name={item.icon} /><span>{item.name}</span>{item.name === "Beyond Your Taste" && <i>NEW</i>}</button>)}</nav>
       <div className="sidebar-bottom">
-        {authUser ? <button className="profile" onClick={handleLogout}><span>U</span><span><strong>{authUser.name}</strong><small>Logout</small></span><Icon name="arrow" /></button> : <><button className="profile" onClick={() => setAuthMode("login")}><span>?</span><span><strong>Sign in</strong><small>Access your account</small></span><Icon name="arrow" /></button><button className="profile" onClick={() => setAuthMode("register")}><span>+</span><span><strong>Create account</strong><small>Join CineMind</small></span><Icon name="arrow" /></button></>}
-        <button className="taste-progress" onClick={() => setOnboarding(true)}><span className="progress-ring">{profileProgress}</span><span><strong>Taste profile</strong><small>Refine local recommendations</small></span><Icon name="arrow" /></button>
+        {authUser && <button className="profile" onClick={handleLogout}><span>U</span><span><strong>{authUser.name}</strong><small>Logout</small></span><Icon name="arrow" /></button>}
+        <button className="taste-progress" onClick={() => setOnboarding(true)}><span className="progress-ring">{Math.min(100, 20 + safeProfile.genres.length * 7 + safeProfile.languages.length * 5 + safeProfile.favouriteMovies.length * 4)}</span><span><strong>Taste profile</strong><small>Languages, genres & favourites</small></span><Icon name="arrow" /></button>
         <button className="theme-toggle" onClick={() => setTheme(safeTheme === "dark" ? "light" : "dark")}><Icon name={safeTheme === "dark" ? "moon" : "sun"} /><span>{safeTheme === "dark" ? "Dark" : "Light"} theme</span><i><b /></i></button>
-        <button className="profile" onClick={() => setOnboarding(true)}><span>AM</span><span><strong>Alex Morgan</strong><small>Refine taste profile</small></span><Icon name="arrow" /></button>
       </div>
     </aside>
     <header className="mobile-header"><button className="brand" onClick={() => setOnboarding(true)}><span className="brand-mark">C</span><strong>CineMind</strong></button><button onClick={() => setMobileMenu(!mobileMenu)} aria-label="Toggle menu"><Icon name={mobileMenu ? "close" : "menu"} /></button></header>
-    <main>{content}<footer><div className="brand"><span className="brand-mark">C</span><strong>CineMind</strong></div><p>Know your taste. Discover beyond it.</p><span>Prototype · Sample movie data · No backend connected</span></footer></main>
+    <main>{content}<footer><div className="brand"><span className="brand-mark">C</span><strong>CineMind</strong></div><p>Know your taste. Discover beyond it.</p><span>Live TMDB catalogue · multilingual hybrid recommendations · TMDB attribution applies</span></footer></main>
     <nav className="mobile-nav" aria-label="Primary mobile navigation">{nav.map((item) => <button key={item.name} onClick={() => navigate(item.name)} className={page === item.name ? "active" : ""}><Icon name={item.icon} /><span>{item.name.replace("Beyond Your Taste", "Beyond").replace("Mood & Context", "Mood").replace("My Collection", "Collection").replace("ML Insights", "Insights")}</span></button>)}</nav>
     {searchOpen && <SearchOverlay close={() => setSearchOpen(false)} openMovie={setSelected} />}
     {selected && <DetailModal movie={selected} close={() => setSelected(null)} props={props} />}
-    {onboarding && <Onboarding close={() => setOnboarding(false)} complete={completeOnboarding} />}
-    {authMode && (
-      <div className="modal-overlay" onClick={() => setAuthMode(null)}>
-        <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
-          <h2>{authMode === "login" ? "Sign in" : "Create account"}</h2>
-          <form onSubmit={(e) => {
-            e.preventDefault();
-            const fd = new FormData(e.currentTarget);
-            const email = String(fd.get("email") || "");
-            const password = String(fd.get("password") || "");
-            if (authMode === "login") handleLogin(email, password);
-            else handleRegister(String(fd.get("name") || ""), email, password);
-          }}>
-            {authMode === "register" && <input name="name" placeholder="Name" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />}
-            <input name="email" type="email" placeholder="Email" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
-            <input name="password" type="password" placeholder="Password" required style={{ width: "100%", marginBottom: 8, padding: 8 }} />
-            {authError && <p style={{ color: "red" }}>{authError}</p>}
-            <Button type="submit" disabled={authLoading}>{authLoading ? "..." : authMode === "login" ? "Sign in" : "Create account"}</Button>
-          </form>
-          <button onClick={() => setAuthMode(authMode === "login" ? "register" : "login")} style={{ marginTop: 8, background: "none", border: "none", color: "inherit", cursor: "pointer" }}>
-            {authMode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}
-          </button>
-        </div>
-      </div>
-    )}
-    {toast && <div className="toast" role="status"><Icon name="check" />{toast}<small>Stored on this device only</small></div>}
+    {onboarding && <Onboarding close={() => setOnboarding(false)} complete={completeOnboarding} languages={languages} />}
+    {toast && <div className="toast" role="status"><Icon name="check" />{toast}<small>Account-backed when the backend is reachable</small></div>}
   </div>;
 }

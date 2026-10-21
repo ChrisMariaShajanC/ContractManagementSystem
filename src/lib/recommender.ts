@@ -10,6 +10,7 @@ export type DiscoverySettings = {
 };
 export type TasteProfile = {
   genres: string[];
+  languages: string[];
   favouriteMovies: number[];
   discovery: "familiar" | "new";
 };
@@ -23,7 +24,7 @@ export type RecommendationContext = {
 export type RankedMovie = { movie: Movie; score: number; explanation: string; diversityReason?: string };
 
 export const defaultDiscovery: DiscoverySettings = { mode: "surprise", familiarity: 38, diversity: 66, novelty: 72, popularity: 44 };
-export const defaultProfile: TasteProfile = { genres: ["Drama", "Mystery"], favouriteMovies: [], discovery: "new" };
+export const defaultProfile: TasteProfile = { genres: [], languages: [], favouriteMovies: [], discovery: "new" };
 
 function overlappingGenres(movie: Movie, ids: number[], catalogue: MovieCatalogueAdapter) {
   const referenceGenres = new Set(ids.flatMap((id) => catalogue.getById(id)?.genres || []));
