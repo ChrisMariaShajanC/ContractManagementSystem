@@ -1,4 +1,4 @@
-# ContractIQ
+# Contract Management System
 
 ContractIQ is a contract analysis and proactive tracking platform that helps manage contracts, obligations, and renewals.
 
